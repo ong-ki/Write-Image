@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # USB Bootable Creator
 
 A native Android application written in **Kotlin** and **Jetpack Compose (Material 3)** that creates real, verified bootable USB flash drives directly from an Android phone using **USB OTG**, Android's **USB Host API**, and the **Storage Access Framework (SAF)** — with **no root required** for standard USB flash drives.
@@ -87,3 +88,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 3. If prompted, allow **Install unknown apps** for your Files app.
 4. Tap **Install**, then open **USB Bootable Creator**.
 5. Connect a USB flash drive via a USB OTG adapter, tap **SELECT ISO**, tap **SELECT USB DRIVE** (grant USB permission when prompted), and tap **CREATE BOOTABLE USB**.
+=======
+# Write-Image
+Create bootable USB drive
+>>>>>>> 79421b8ccdc425dab51914ff6297f93b397a2ded
