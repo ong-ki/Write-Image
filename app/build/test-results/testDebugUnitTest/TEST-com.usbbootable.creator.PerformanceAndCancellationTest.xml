@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.usbbootable.creator.PerformanceAndCancellationTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-11-21T10:58:18.474Z" hostname="zin-x450cc" time="2.497">
+  <properties/>
+  <testcase name="benchmarkBufferSizesOnRealFileBackedSequentialWrite" classname="com.usbbootable.creator.PerformanceAndCancellationTest" time="2.387"/>
+  <testcase name="instantCancellationStopsPromptlyPreventsFurtherWritesAndUpdatesStateImmediately" classname="com.usbbootable.creator.PerformanceAndCancellationTest" time="0.084"/>
+  <testcase name="bottomNavigationContainsOnlyThreeTabsAndKeepScreenOnFollowsLifecycleStates" classname="com.usbbootable.creator.PerformanceAndCancellationTest" time="0.024"/>
+  <system-out><![CDATA[BENCHMARK buffer=64KiB | elapsed=0.767s | effectiveEndToEnd(Write+Verify)=20.9 MB/s
+BENCHMARK buffer=128KiB | elapsed=0.358s | effectiveEndToEnd(Write+Verify)=44.6 MB/s
+BENCHMARK buffer=256KiB | elapsed=0.328s | effectiveEndToEnd(Write+Verify)=48.7 MB/s
+BENCHMARK buffer=512KiB | elapsed=0.351s | effectiveEndToEnd(Write+Verify)=45.6 MB/s
+BENCHMARK buffer=1024KiB | elapsed=0.313s | effectiveEndToEnd(Write+Verify)=51.2 MB/s
+CANCEL_BENCHMARK stopLatency=60ms | totalWriteCalls=3 | writesAfterCancel=0
+]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

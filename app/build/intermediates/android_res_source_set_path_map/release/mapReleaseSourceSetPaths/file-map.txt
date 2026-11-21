@@ -1,0 +1,7 @@
+com.usbbootable.creator.app-pngs-0 /home/zin/Desktop/WriteImage/app/build/generated/res/pngs/release
+com.usbbootable.creator.app-updated_navigation_xml-1 /home/zin/Desktop/WriteImage/app/build/generated/updated_navigation_xml/release
+com.usbbootable.creator.app-packageReleaseResources-2 /home/zin/Desktop/WriteImage/app/build/intermediates/incremental/release/packageReleaseResources/merged.dir
+com.usbbootable.creator.app-packageReleaseResources-3 /home/zin/Desktop/WriteImage/app/build/intermediates/incremental/release/packageReleaseResources/stripped.dir
+com.usbbootable.creator.app-release-4 /home/zin/Desktop/WriteImage/app/build/intermediates/merged_res/release/mergeReleaseResources
+com.usbbootable.creator.app-main-5 /home/zin/Desktop/WriteImage/app/src/main/res
+com.usbbootable.creator.app-release-6 /home/zin/Desktop/WriteImage/app/src/release/res

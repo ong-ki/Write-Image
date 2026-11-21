@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- USB Mass Storage Class (8), SCSI Transparent Command Set (6), Bulk-Only Transport (80) -->
+    <usb-device class="8" subclass="6" protocol="80" />
+    <!-- SFF-8070i (5) Bulk-Only Transport (80) -->
+    <usb-device class="8" subclass="5" protocol="80" />
+</resources>

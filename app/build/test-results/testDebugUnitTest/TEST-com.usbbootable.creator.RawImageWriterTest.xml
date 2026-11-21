@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.usbbootable.creator.RawImageWriterTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-11-21T10:58:20.992Z" hostname="zin-x450cc" time="0.053">
+  <properties/>
+  <testcase name="rawWriteAndSha256VerificationSucceedsEndToEnd" classname="com.usbbootable.creator.RawImageWriterTest" time="0.024"/>
+  <testcase name="rawVerificationDetectsCorruptedMedia" classname="com.usbbootable.creator.RawImageWriterTest" time="0.017"/>
+  <testcase name="safeCancellationPropagatesCancellationExceptionWithoutSwallowing" classname="com.usbbootable.creator.RawImageWriterTest" time="0.011"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

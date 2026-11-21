@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- USB Flash Drive body -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M42,24h24v16h-24z" />
+    <!-- USB Connector pins -->
+    <path
+        android:fillColor="#0F172A"
+        android:pathData="M47,29h4v5h-4zM57,29h4v5h-4z" />
+    <!-- Main drive housing -->
+    <path
+        android:fillColor="#F8FAFC"
+        android:pathData="M34,40h40c2.2,0 4,1.8 4,4v32c0,6.6 -5.4,12 -12,12h-24c-6.6,0 -12,-5.4 -12,-12v-32c0,-2.2 1.8,-4 4,-4z" />
+    <!-- Boot bolt icon inside housing -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M56,48l-11,16h8l-3,14l13,-18h-8z" />
+</vector>
