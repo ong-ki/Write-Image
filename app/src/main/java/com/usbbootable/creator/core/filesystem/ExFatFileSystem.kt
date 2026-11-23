@@ -37,7 +37,7 @@ class ExFatFileSystem(
     val clusterCount: Long
 
     val volumeSerialNumber: Int = SecureRandom().nextInt()
-    val cleanVolumeLabel: String = volumeLabel.take(11).ifBlank { "WIN_INSTALL" }
+    val cleanVolumeLabel: String = volumeLabel.trim().take(11).ifEmpty { "WIN_INSTALL" }
 
     private val upCaseMap = CharArray(65536) { idx -> idx.toChar().uppercaseChar() }
     private val upCaseTableBytes: ByteArray
@@ -143,10 +143,17 @@ class ExFatFileSystem(
     fun getWrittenFiles(): List<WrittenFileAllocation> = writtenFiles.toList()
 
     fun ensureDirectory(normalizedPath: String) {
-        val parts = normalizedPath.split('/').filter { it.isNotEmpty() }
+        val parts = FileSystemIoHelpers.splitAndValidatePath(normalizedPath)
         var cur = rootDir
         for (part in parts) {
             val key = part.lowercase(Locale.ROOT)
+            FileSystemIoHelpers.ensureNoCaseCollision(
+                parentPathHint = normalizedPath,
+                newName = part,
+                existingDirKeys = emptySet(),
+                existingFileNames = cur.childrenFiles.map { it.name },
+                expectDirectory = true
+            )
             cur = cur.childrenDirs.getOrPut(key) { DirNode(name = part) }
         }
     }
@@ -164,15 +171,28 @@ class ExFatFileSystem(
     ): WrittenFileAllocation {
         require(sizeBytes >= 0L) { "Negative file size: $sizeBytes" }
 
-        val parts = normalizedPath.split('/').filter { it.isNotEmpty() }
-        require(parts.isNotEmpty()) { "Empty file path" }
+        val parts = FileSystemIoHelpers.splitAndValidatePath(normalizedPath)
         var parent = rootDir
         for (i in 0 until parts.size - 1) {
             val part = parts[i]
             val key = part.lowercase(Locale.ROOT)
+            FileSystemIoHelpers.ensureNoCaseCollision(
+                parentPathHint = normalizedPath,
+                newName = part,
+                existingDirKeys = emptySet(),
+                existingFileNames = parent.childrenFiles.map { it.name },
+                expectDirectory = true
+            )
             parent = parent.childrenDirs.getOrPut(key) { DirNode(name = part) }
         }
         val fileName = parts.last()
+        FileSystemIoHelpers.ensureNoCaseCollision(
+            parentPathHint = normalizedPath,
+            newName = fileName,
+            existingDirKeys = parent.childrenDirs.keys,
+            existingFileNames = parent.childrenFiles.map { it.name },
+            expectDirectory = false
+        )
 
         sha256Digest.reset()
         val neededClusters = if (sizeBytes == 0L) 0L else (sizeBytes + clusterSizeBytes - 1L) / clusterSizeBytes
@@ -192,54 +212,21 @@ class ExFatFileSystem(
         }
 
         val firstCluster = allocateContiguousClusters(neededClusters)
-        var currentLba = clusterToLba(firstCluster)
-
-        val writeBuf = reusableIoBuffer
-        var bufFill = 0
-        var totalWritten = 0L
-
-        streamer { data, len ->
-            if (isCancelled()) throw CancellationException("exFAT write cancelled.")
-            if (len <= 0) return@streamer
-            sha256Digest.update(data, 0, len)
-            var srcPos = 0
-            var rem = len
-            while (rem > 0) {
-                val space = batchBytes - bufFill
-                val toCopy = minOf(rem, space)
-                System.arraycopy(data, srcPos, writeBuf, bufFill, toCopy)
-                bufFill += toCopy
-                srcPos += toCopy
-                rem -= toCopy
-
-                if (bufFill == batchBytes) {
-                    if (isCancelled()) throw CancellationException("exFAT write cancelled.")
-                    val secCount = batchBytes / blockSize
-                    device.writeBlocks(currentLba, secCount, writeBuf, 0)
-                    currentLba += secCount
-                    totalWritten += batchBytes
-                    onBytesWritten(batchBytes.toLong())
-                    bufFill = 0
-                }
-            }
-        }
-
-        if (bufFill > 0) {
-            if (isCancelled()) throw CancellationException("exFAT write cancelled.")
-            val paddedClusters = (bufFill + clusterSizeBytes - 1) / clusterSizeBytes
-            val paddedBytes = paddedClusters * clusterSizeBytes
-            writeBuf.fill(0, bufFill, paddedBytes)
-            val secCount = paddedBytes / blockSize
-            device.writeBlocks(currentLba, secCount, writeBuf, 0)
-            totalWritten += bufFill
-            onBytesWritten(bufFill.toLong())
-        }
-
-        if (totalWritten != sizeBytes) {
-            throw IOException(
-                "exFAT stream size mismatch for '$normalizedPath': expected=$sizeBytes, got=$totalWritten"
-            )
-        }
+        val shaHex = FileSystemIoHelpers.streamToContiguousClusters(
+            device = device,
+            normalizedPath = normalizedPath,
+            fsLabel = "exFAT",
+            startLba = clusterToLba(firstCluster),
+            expectedSizeBytes = sizeBytes,
+            blockSize = blockSize,
+            clusterSizeBytes = clusterSizeBytes,
+            batchBytes = batchBytes,
+            writeBuf = reusableIoBuffer,
+            digest = sha256Digest,
+            isCancelled = isCancelled,
+            streamer = streamer,
+            onBytesWritten = onBytesWritten
+        )
 
         parent.childrenFiles.add(FileNode(name = fileName, sizeBytes = sizeBytes, firstCluster = firstCluster))
         val rec = WrittenFileAllocation(
@@ -247,7 +234,7 @@ class ExFatFileSystem(
             sizeBytes = sizeBytes,
             firstCluster = firstCluster,
             clusterCount = neededClusters,
-            sha256Hex = ByteUtils.toHex(sha256Digest.digest())
+            sha256Hex = shaHex
         )
         writtenFiles.add(rec)
         return rec
@@ -316,32 +303,22 @@ class ExFatFileSystem(
         record: WrittenFileAllocation,
         onBytesVerified: (Long) -> Unit = {}
     ): Boolean {
-        sha256Digest.reset()
-        if (record.sizeBytes == 0L) {
-            return ByteUtils.toHex(sha256Digest.digest()) == record.sha256Hex
-        }
-
-        val readBuf = reusableIoBuffer
-        var currentLba = clusterToLba(record.firstCluster)
-        var remainingBytes = record.sizeBytes
-        var remainingClusters = record.clusterCount
-
-        while (remainingClusters > 0L) {
-            if (isCancelled()) throw CancellationException("exFAT verification cancelled.")
-            val clustersToRead = minOf(remainingClusters, batchClusters.toLong()).toInt()
-            val sectorsToRead = clustersToRead * sectorsPerCluster
-            device.readBlocks(currentLba, sectorsToRead, readBuf, 0)
-
-            val validBytes = minOf(remainingBytes, (clustersToRead * clusterSizeBytes).toLong()).toInt()
-            sha256Digest.update(readBuf, 0, validBytes)
-            onBytesVerified(validBytes.toLong())
-
-            currentLba += sectorsToRead
-            remainingClusters -= clustersToRead
-            remainingBytes -= validBytes
-        }
-
-        return ByteUtils.toHex(sha256Digest.digest()) == record.sha256Hex
+        return FileSystemIoHelpers.verifyFromContiguousClusters(
+            device = device,
+            fsLabel = "exFAT",
+            startLba = if (record.sizeBytes > 0L) clusterToLba(record.firstCluster) else 0L,
+            sizeBytes = record.sizeBytes,
+            clusterCount = record.clusterCount,
+            blockSize = blockSize,
+            clusterSizeBytes = clusterSizeBytes,
+            sectorsPerCluster = sectorsPerCluster,
+            batchClusters = batchClusters,
+            readBuf = reusableIoBuffer,
+            digest = sha256Digest,
+            expectedSha256Hex = record.sha256Hex,
+            isCancelled = isCancelled,
+            onBytesVerified = onBytesVerified
+        )
     }
 
     private fun allocateContiguousClusters(count: Long): Long {
@@ -660,7 +637,13 @@ class ExFatFileSystem(
                         i += run
                     } else {
                         for (k in 0 until run) {
-                            shorts.add(i + k)
+                            val cp = i + k
+                            if (cp == 0xFFFF) {
+                                shorts.add(0xFFFF)
+                                shorts.add(1)
+                            } else {
+                                shorts.add(cp)
+                            }
                         }
                         i += run
                     }

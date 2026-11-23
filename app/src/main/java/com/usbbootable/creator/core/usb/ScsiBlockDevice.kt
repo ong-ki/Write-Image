@@ -21,8 +21,7 @@ class ScsiBlockDevice(
     private val logger: OperationLogger? = null,
     maxTransferBytes: Int = DEFAULT_MAX_TRANSFER_BYTES,
     private val isCancelled: () -> Boolean = { false },
-    private val sleepMs: (Long) -> Unit = { ms -> if (ms > 0L) Thread.sleep(ms) },
-    private val onClose: () -> Unit = {}
+    private val sleepMs: (Long) -> Unit = { ms -> if (ms > 0L) Thread.sleep(ms) }
 ) : BlockDevice {
 
     lateinit var inquiry: ScsiInquiryData
@@ -83,7 +82,7 @@ class ScsiBlockDevice(
         waitUntilReady()
 
         // 3. MODE SENSE (6) 4-byte header to detect hardware write-protect switch
-        isReadOnly = probeWriteProtect()
+        isReadOnly = isReadOnly || probeWriteProtect()
 
         // 4. READ CAPACITY (10), upgrading to READ CAPACITY (16) for >2 TiB drives
         val cap10Buf = ByteArray(8)
@@ -117,8 +116,10 @@ class ScsiBlockDevice(
         if (blockSize <= 0 || (blockSize and (blockSize - 1)) != 0 || blockSize < 512 || blockSize > 65536) {
             throw UsbStorageException("Unsupported logical block size reported by USB drive: $blockSize bytes")
         }
-        if (totalBlocks <= 0L) {
-            throw UsbStorageException("USB drive reported zero usable blocks (no media present).")
+        if (totalBlocks <= 0L || totalBlocks > Long.MAX_VALUE / blockSize.toLong()) {
+            throw UsbStorageException(
+                "USB drive reported invalid block geometry (blocks=$totalBlocks, blockSize=$blockSize)."
+            )
         }
 
         initialized = true
@@ -186,10 +187,18 @@ class ScsiBlockDevice(
                 if (result.isCommandFailed) requestSense()
                 false
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UsbDisconnectedException) {
+            throw e
         } catch (_: Exception) {
             // If a controller stalled MODE SENSE (6), ensure the LUN is ready before continuing
             try {
                 waitUntilReady(maxAttempts = 4)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (de: UsbDisconnectedException) {
+                throw de
             } catch (_: Exception) {
             }
             false
@@ -272,16 +281,17 @@ class ScsiBlockDevice(
         offset: Int,
         byteLen: Int
     ) {
-        val opLabel = if (isWrite) {
-            "WRITE(LBA=$lba, blocks=$blockCount, bytes=$byteLen)"
-        } else {
-            "READ(LBA=$lba, blocks=$blockCount, bytes=$byteLen)"
-        }
         val direction = if (isWrite) BotDirection.OUT else BotDirection.IN
         val timeout = if (isWrite) UsbBotTransport.WRITE_CSW_TIMEOUT_MS else UsbBotTransport.DEFAULT_TIMEOUT_MS
 
         var lastError: Exception? = null
-        val recoveryLog = mutableListOf<String>()
+        var recoveryLog: MutableList<String>? = null
+        var opLabelCache: String? = null
+        fun opLabel(): String = opLabelCache ?: (if (isWrite) {
+            "WRITE(LBA=$lba, blocks=$blockCount, bytes=$byteLen)"
+        } else {
+            "READ(LBA=$lba, blocks=$blockCount, bytes=$byteLen)"
+        }).also { opLabelCache = it }
 
         for (attempt in 1..MAX_BLOCK_RECOVERY_ATTEMPTS) {
             if (isCancelled()) throw CancellationException("USB transfer cancelled.")
@@ -334,6 +344,8 @@ class ScsiBlockDevice(
             } catch (e: UsbStorageException) {
                 lastError = e
                 if (isCancelled()) throw CancellationException("USB transfer cancelled.")
+                val op = opLabel()
+                val logList = recoveryLog ?: mutableListOf<String>().also { recoveryLog = it }
 
                 val resetAlreadyDone = (e as? UsbBotCommandException)?.resetPerformed == true
                 if (!resetAlreadyDone) {
@@ -346,36 +358,36 @@ class ScsiBlockDevice(
                     activeMaxTransferBytes = (activeMaxTransferBytes / 2).coerceAtLeast(MIN_TRANSFER_BYTES)
                     logger?.warn(
                         TAG,
-                        "Stepping down SCSI transfer size from ${prev}B to ${activeMaxTransferBytes}B after $opLabel failure"
+                        "Stepping down SCSI transfer size from ${prev}B to ${activeMaxTransferBytes}B after $op failure"
                     )
                 }
 
                 if (attempt == MAX_BLOCK_RECOVERY_ATTEMPTS) {
-                    recoveryLog.add("Attempt $attempt/$MAX_BLOCK_RECOVERY_ATTEMPTS exhausted (${e.message})")
+                    logList.add("Attempt $attempt/$MAX_BLOCK_RECOVERY_ATTEMPTS exhausted (${e.message})")
                     break
                 }
 
                 // Reinitialize SCSI communication state and verify drive readiness before retrying!
-                val reinitStatus = reinitializeAfterReset(opLabel)
-                recoveryLog.add("Attempt $attempt: ${e.message} -> Reinit: $reinitStatus")
+                val reinitStatus = reinitializeAfterReset(op)
+                logList.add("Attempt $attempt: ${e.message} -> Reinit: $reinitStatus")
                 if (!reinitStatus.startsWith("READY")) {
                     // Do NOT blindly retry writes when communication cannot be re-established cleanly!
                     throw UsbStorageException(
-                        "Unrecoverable USB error during $opLabel | " +
+                        "Unrecoverable USB error during $op | " +
                             "Endpoints: ${transport.endpointSummary} | " +
                             "Aborting to prevent data corruption because post-reset drive reinitialization failed ($reinitStatus). " +
-                            "History: ${recoveryLog.joinToString(" ; ")}",
+                            "History: ${logList.joinToString(" ; ")}",
                         e
                     )
                 }
-                logger?.info(TAG, "SCSI target reinitialized ($reinitStatus); safely retrying $opLabel (attempt ${attempt + 1})")
+                logger?.info(TAG, "SCSI target reinitialized ($reinitStatus); safely retrying $op (attempt ${attempt + 1})")
             }
         }
 
         throw UsbStorageException(
-            "USB command failed after $MAX_BLOCK_RECOVERY_ATTEMPTS recovery attempts: $opLabel | " +
+            "USB command failed after $MAX_BLOCK_RECOVERY_ATTEMPTS recovery attempts: ${opLabel()} | " +
                 "Endpoints: ${transport.endpointSummary} | " +
-                "Details: ${recoveryLog.joinToString(" ; ")}",
+                "Details: ${recoveryLog.orEmpty().joinToString(" ; ")}",
             lastError
         )
     }
@@ -390,7 +402,10 @@ class ScsiBlockDevice(
         byteLen: Int,
         timeoutMs: Int
     ) {
-        val cdb = if (lba + blockCount <= 0xFFFFFFFFL && blockCount <= 0xFFFF) {
+        val use10 = lba <= 0xFFFFFFFFL &&
+            blockCount <= 0xFFFF &&
+            (lba + blockCount.toLong() - 1L) <= 0xFFFFFFFFL
+        val cdb = if (use10) {
             fillReadWrite10Cdb(
                 if (isWrite) ScsiCommandSet.OP_WRITE_10 else ScsiCommandSet.OP_READ_10,
                 lba,
@@ -403,10 +418,14 @@ class ScsiBlockDevice(
                 blockCount
             )
         }
-        val cmdName = if (isWrite) {
-            "WRITE(0x2A, LBA=$lba, blocks=$blockCount)"
-        } else {
-            "READ(0x28, LBA=$lba, blocks=$blockCount)"
+        fun cmdDetail(): String {
+            val opHex = when {
+                isWrite && use10 -> "0x2A"
+                isWrite -> "0x8A"
+                use10 -> "0x28"
+                else -> "0x88"
+            }
+            return "${if (isWrite) "WRITE" else "READ"}($opHex, LBA=$lba, blocks=$blockCount)"
         }
 
         val result = transport.executeCommand(
@@ -416,19 +435,19 @@ class ScsiBlockDevice(
             dataBuffer = buffer,
             dataOffset = offset,
             dataLength = byteLen,
-            commandName = cmdName,
+            commandName = if (isWrite) "WRITE" else "READ",
             timeoutMs = timeoutMs
         )
 
         if (result.isSuccess) {
-            if (result.bytesTransferred < byteLen) {
+            if (result.bytesTransferred < byteLen || result.dataResidue != 0) {
                 throw UsbBotCommandException(
-                    commandName = cmdName,
+                    commandName = cmdDetail(),
                     endpointInfo = transport.endpointSummary,
                     transferredBytes = result.bytesTransferred,
                     expectedBytes = byteLen,
                     usbErrorCode = result.dataResidue,
-                    recoveryStatus = "Short block transfer (residue=${result.dataResidue})",
+                    recoveryStatus = "Incomplete block transfer (transferred=${result.bytesTransferred}/$byteLen, residue=${result.dataResidue})",
                     resetPerformed = false
                 )
             }
@@ -436,6 +455,7 @@ class ScsiBlockDevice(
         }
 
         if (result.isCommandFailed) {
+            val cmdName = cmdDetail()
             val sense = requestSense()
             if (sense.isDataProtect) {
                 isReadOnly = true
@@ -451,6 +471,16 @@ class ScsiBlockDevice(
                 resetPerformed = false
             )
         }
+
+        throw UsbBotCommandException(
+            commandName = cmdDetail(),
+            endpointInfo = transport.endpointSummary,
+            transferredBytes = result.bytesTransferred,
+            expectedBytes = byteLen,
+            usbErrorCode = result.status,
+            recoveryStatus = "Unexpected CSW status 0x%02X".format(result.status),
+            resetPerformed = false
+        )
     }
 
     /**
@@ -541,20 +571,23 @@ class ScsiBlockDevice(
                     logger?.warn(TAG, "SYNCHRONIZE CACHE warning: ${sense.describe()}")
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: UsbDisconnectedException) {
             throw e
         } catch (e: Exception) {
-            logger?.warn(TAG, "SYNCHRONIZE CACHE skipped: ${e.message}")
+            // A failed cache flush means the drive may not have committed the write. Do not
+            // let the operation report COMPLETED after a transport-level flush failure.
+            logger?.warn(TAG, "SYNCHRONIZE CACHE failed: ${e.message}")
+            throw UsbStorageException(
+                "Failed to flush USB drive write cache: ${e.message ?: "unknown I/O error"}",
+                e
+            )
         }
     }
 
     override fun close() {
-        if (closed) return
         closed = true
-        try {
-            onClose()
-        } catch (_: Exception) {
-        }
     }
 
     private fun executeControlOrMetaCommand(
@@ -579,7 +612,7 @@ class ScsiBlockDevice(
                     commandName = operationName
                 )
                 if (result.isSuccess) {
-                    if (length > 0 && result.bytesTransferred < length && result.dataResidue > 0) {
+                    if (length > 0 && result.bytesTransferred < length) {
                         throw UsbStorageException(
                             "$operationName short transfer: transferred=${result.bytesTransferred}/$length residue=${result.dataResidue}"
                         )
@@ -599,6 +632,7 @@ class ScsiBlockDevice(
                     }
                     throw UsbStorageException("$operationName failed: ${sense.describe()}")
                 }
+                throw UsbStorageException("$operationName failed with CSW status 0x%02X".format(result.status))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: UsbDisconnectedException) {
@@ -629,11 +663,15 @@ class ScsiBlockDevice(
                 commandName = "REQUEST_SENSE(0x03)",
                 timeoutMs = 4_000
             )
-            if (res.isSuccess && res.bytesTransferred >= 14) {
-                ScsiCommandSet.parseSense(senseBuf)
+            if (res.isSuccess && res.bytesTransferred >= 4) {
+                ScsiCommandSet.parseSense(senseBuf, res.bytesTransferred)
             } else {
                 ScsiSenseData(0, 0x04, 0, 0)
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UsbDisconnectedException) {
+            throw e
         } catch (_: Exception) {
             ScsiSenseData(0, 0x04, 0, 0)
         }
@@ -645,13 +683,13 @@ class ScsiBlockDevice(
     }
 
     private fun validateTransferArgs(startLba: Long, blockCount: Int, buffer: ByteArray, offset: Int) {
-        if (startLba < 0L || blockCount < 0 || startLba + blockCount > totalBlocks) {
+        if (startLba < 0L || blockCount < 0 || startLba > totalBlocks || blockCount.toLong() > totalBlocks - startLba) {
             throw IOException(
                 "Block I/O out of range: lba=$startLba count=$blockCount totalBlocks=$totalBlocks"
             )
         }
         val neededBytes = blockCount.toLong() * blockSize.toLong()
-        if (offset < 0 || offset + neededBytes > buffer.size) {
+        if (offset < 0 || neededBytes > (buffer.size - offset).toLong()) {
             throw IllegalArgumentException(
                 "Buffer too small: offset=$offset needed=$neededBytes bufferSize=${buffer.size}"
             )

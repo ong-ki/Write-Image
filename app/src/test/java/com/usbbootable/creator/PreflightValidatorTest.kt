@@ -123,7 +123,7 @@ class PreflightValidatorTest {
             flashingMode = FlashingMode.LINUX
         )
         assertFalse(res.canProceed)
-        assertTrue(res.blockers.any { it.contains("do not raw-write Windows ISOs") })
+        assertTrue(res.blockers.any { it.contains("Raw-writing a Windows ISO in Linux mode") })
     }
 
     @Test
@@ -135,7 +135,7 @@ class PreflightValidatorTest {
             flashingMode = FlashingMode.WINDOWS
         )
         assertFalse(res.canProceed)
-        assertTrue(res.blockers.any { it.contains("Windows Bootable USB mode is selected") })
+        assertTrue(res.blockers.any { it.contains("Incompatible Flashing Mode") })
     }
 
     @Test

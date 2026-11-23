@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -23,6 +24,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.usbbootable.creator.core.util.LogEntry
 import com.usbbootable.creator.core.util.LogLevel
+import com.usbbootable.creator.ui.theme.GlassSheetShape
+import com.usbbootable.creator.ui.theme.glassDialogContainerColor
+import com.usbbootable.creator.ui.theme.glassScrimColor
 import com.usbbootable.creator.ui.theme.statusSuccessColor
 import com.usbbootable.creator.ui.theme.statusWarningColor
 
@@ -38,7 +42,9 @@ fun OperationLogSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surface
+        shape = GlassSheetShape,
+        containerColor = glassDialogContainerColor(),
+        scrimColor = glassScrimColor()
     ) {
         Column(
             modifier = Modifier
@@ -51,7 +57,7 @@ fun OperationLogSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "USB / SCSI Diagnostic Log",
                         style = MaterialTheme.typography.titleLarge
@@ -62,6 +68,7 @@ fun OperationLogSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                Spacer(modifier = Modifier.width(8.dp))
                 TextButton(onClick = onClear) {
                     Text("CLEAR")
                 }
@@ -89,7 +96,7 @@ fun OperationLogSheet(
                         modifier = Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        items(logs.asReversed()) { entry ->
+                        items(logs.asReversed(), key = { it.id }) { entry ->
                             val tint = when (entry.level) {
                                 LogLevel.INFO -> MaterialTheme.colorScheme.onSurface
                                 LogLevel.SUCCESS -> statusSuccessColor()

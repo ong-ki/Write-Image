@@ -8,21 +8,42 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.usbbootable.creator.core.writer.WritePhase
+import com.usbbootable.creator.ui.AppTab
+import com.usbbootable.creator.ui.BackAction
+import com.usbbootable.creator.ui.BackPressCoordinator
 import com.usbbootable.creator.ui.MainViewModel
+import com.usbbootable.creator.ui.screens.AppSplashScreen
 import com.usbbootable.creator.ui.screens.MainTabsScaffold
 import com.usbbootable.creator.ui.theme.UsbBootableCreatorTheme
+import com.usbbootable.creator.ui.theme.resolveDarkTheme
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -47,21 +68,96 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        splashScreen.setKeepOnScreenCondition { !viewModel.isStartupReady.value }
+        splashScreen.setOnExitAnimationListener { splashViewProvider ->
+            splashViewProvider.remove()
+        }
+        val initialSplashBars = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        enableEdgeToEdge(
+            statusBarStyle = initialSplashBars,
+            navigationBarStyle = initialSplashBars
+        )
 
-        requestNotificationPermissionIfNeeded()
-        handleUsbAttachIntent(intent)
+        if (savedInstanceState == null) {
+            requestNotificationPermissionIfNeeded()
+            handleUsbAttachIntent(intent)
+        }
         observeKeepScreenOnState()
 
         setContent {
             val state by viewModel.uiState.collectAsStateWithLifecycle()
+            val isStartupReady by viewModel.isStartupReady.collectAsStateWithLifecycle()
+            val splashDismissed by viewModel.splashDismissed.collectAsStateWithLifecycle()
+            val useDarkTheme = resolveDarkTheme(state.themeMode, isSystemInDarkTheme())
+            val effectiveDarkBars = !splashDismissed || useDarkTheme
+            val backCoordinator = remember { BackPressCoordinator() }
+            var exitToast by remember { mutableStateOf<Toast?>(null) }
 
-            UsbBootableCreatorTheme(themeMode = state.themeMode) {
-                MainTabsScaffold(
+            DisposableEffect(effectiveDarkBars) {
+                val barStyle = if (effectiveDarkBars) {
+                    SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                } else {
+                    SystemBarStyle.light(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT
+                    )
+                }
+                enableEdgeToEdge(
+                    statusBarStyle = barStyle,
+                    navigationBarStyle = barStyle
+                )
+                onDispose {}
+            }
+
+            // Do not leak the Activity context or leave a queued Toast behind if the
+            // composition is disposed while the exit prompt is visible.
+            DisposableEffect(Unit) {
+                onDispose { exitToast?.cancel() }
+            }
+
+            LaunchedEffect(state.selectedTab) {
+                if (state.selectedTab != AppTab.HOME) {
+                    backCoordinator.reset()
+                }
+            }
+
+            BackHandler(enabled = splashDismissed) {
+                when (backCoordinator.onBackPressed(state.selectedTab)) {
+                    BackAction.NAVIGATE_HOME -> {
+                        viewModel.selectTab(AppTab.HOME)
+                    }
+                    BackAction.SHOW_EXIT_PROMPT -> {
+                        exitToast?.cancel()
+                        exitToast = Toast.makeText(
+                            applicationContext,
+                            "Press back again to exit",
+                            Toast.LENGTH_SHORT
+                        ).apply { show() }
+                    }
+                    BackAction.EXIT_APP -> {
+                        exitToast?.cancel()
+                        finish()
+                    }
+                }
+            }
+
+            UsbBootableCreatorTheme(
+                themeMode = state.themeMode,
+                customization = state.customization
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    MainTabsScaffold(
                     state = state,
+                    logsFlow = viewModel.logs,
                     onSelectTab = viewModel::selectTab,
                     onSetFlashingMode = viewModel::setFlashingMode,
+                    onSetWindowsBypassTpm = viewModel::setWindowsBypassTpm,
+                    onSetWindowsBypassSecureBoot = viewModel::setWindowsBypassSecureBoot,
+                    onSetWindowsBypassRam = viewModel::setWindowsBypassRam,
+                    onSetWindowsBypassCpu = viewModel::setWindowsBypassCpu,
+                    onSetWindowsBypassAll = viewModel::setWindowsBypassAll,
                     onSelectIsoClick = {
                         // Use "*/*" because Android's MIME registry frequently classifies .iso and .img
                         // under application/octet-stream or unrecognized MIME types across OEMs.
@@ -74,13 +170,30 @@ class MainActivity : ComponentActivity() {
                     onConfirmStartWrite = viewModel::startBootableUsbCreation,
                     onCancelWrite = viewModel::cancelActiveWrite,
                     onDismissFinishedStatus = viewModel::dismissFinishedStatus,
+                    onStartUsbHealthCheck = viewModel::startUsbHealthCheck,
+                    onCancelUsbHealthCheck = viewModel::cancelUsbHealthCheck,
+                    onDismissUsbHealthCheck = viewModel::dismissUsbHealthCheck,
                     onDismissBanner = viewModel::dismissBanner,
                     onSetThemeMode = viewModel::setThemeMode,
+                    onApplyCustomization = viewModel::saveAppearanceCustomization,
+                    onResetCustomization = viewModel::resetAppearanceCustomization,
+                    onResetAllSettings = viewModel::restoreDefaults,
                     onSetBufferOption = viewModel::setBufferOption,
                     onSetVerifyAfterWrite = viewModel::setVerifyAfterWrite,
-                    onClearHistory = viewModel::clearHistory,
-                    onClearLogs = viewModel::clearLogs
-                )
+                        onClearHistory = viewModel::clearHistory,
+                        onClearLogs = viewModel::clearLogs
+                    )
+
+                    AnimatedVisibility(
+                        visible = !splashDismissed,
+                        exit = fadeOut(animationSpec = tween(durationMillis = 220))
+                    ) {
+                        AppSplashScreen(
+                            isStartupReady = isStartupReady,
+                            onFinished = viewModel::onSplashFinished
+                        )
+                    }
+                }
             }
         }
     }
@@ -93,8 +206,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refreshUsbDrives()
-        val app = application as UsbBootableApp
-        updateKeepScreenOnFlag(shouldKeepScreenOn(app.writeStateStore.progress.value.phase))
     }
 
     override fun onDestroy() {
@@ -148,10 +259,7 @@ class MainActivity : ComponentActivity() {
         } else {
             intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
         }
-        viewModel.refreshUsbDrives()
-        if (device != null) {
-            viewModel.selectUsbDrive(device.deviceId)
-        }
+        viewModel.onUsbAttachIntent(device?.deviceId)
     }
 
     private fun requestNotificationPermissionIfNeeded() {

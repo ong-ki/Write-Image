@@ -124,6 +124,11 @@ object PreflightValidator {
                             "Target USB reports ${drive.logicalBlockSize}-byte logical sectors instead of 512 bytes. " +
                                 "Raw ISO/MBR partition tables created for 512-byte sectors may not boot on 4Kn drives."
                         )
+                    } else if (drive.logicalBlockSize > 4096) {
+                        blockers.add(
+                            "Target USB reports ${drive.logicalBlockSize}-byte logical sectors; structured " +
+                                "Windows/UEFI formatting supports logical sector sizes up to 4096 bytes."
+                        )
                     } else {
                         warnings.add(
                             "Target USB reports ${drive.logicalBlockSize}-byte logical sectors. Partitions and " +

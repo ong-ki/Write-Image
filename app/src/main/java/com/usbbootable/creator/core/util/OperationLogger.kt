@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 enum class LogLevel {
     INFO,
@@ -18,13 +19,20 @@ data class LogEntry(
     val timestamp: String,
     val level: LogLevel,
     val tag: String,
-    val message: String
+    val message: String,
+    val id: Long = 0L
 )
 
 class OperationLogger(private val maxEntries: Int = 400) {
 
+    init {
+        require(maxEntries > 0) { "maxEntries must be positive: $maxEntries" }
+    }
+
     private val lock = Any()
+    private val nextId = AtomicLong(1L)
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    private val ringBuffer = ArrayDeque<LogEntry>(maxEntries)
     private val _entries = MutableStateFlow<List<LogEntry>>(emptyList())
     val entries: StateFlow<List<LogEntry>> = _entries.asStateFlow()
 
@@ -35,6 +43,7 @@ class OperationLogger(private val maxEntries: Int = 400) {
 
     fun clear() {
         synchronized(lock) {
+            ringBuffer.clear()
             _entries.value = emptyList()
         }
     }
@@ -42,14 +51,12 @@ class OperationLogger(private val maxEntries: Int = 400) {
     private fun append(level: LogLevel, tag: String, message: String) {
         val entry = synchronized(lock) {
             val ts = timeFormat.format(Date())
-            val next = LogEntry(ts, level, tag, message)
-            val current = _entries.value
-            val updated = if (current.size >= maxEntries) {
-                current.drop(current.size - maxEntries + 1) + next
-            } else {
-                current + next
+            val next = LogEntry(ts, level, tag, message, id = nextId.getAndIncrement())
+            if (ringBuffer.size >= maxEntries) {
+                ringBuffer.removeFirst()
             }
-            _entries.value = updated
+            ringBuffer.addLast(next)
+            _entries.value = ArrayList(ringBuffer)
             next
         }
         try {

@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.usbbootable.creator.Fat32FileSystemTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-11-21T10:58:17.591Z" hostname="zin-x450cc" time="0.162">
-  <properties/>
-  <testcase name="formatsFat32WritesNestedLfnFilesVerifiesSha256AndPassesFsckFat" classname="com.usbbootable.creator.Fat32FileSystemTest" time="0.162"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>

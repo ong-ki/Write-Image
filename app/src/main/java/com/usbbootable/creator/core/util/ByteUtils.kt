@@ -153,6 +153,30 @@ object ByteUtils {
         return String.format(Locale.US, "%.2f TiB", tb)
     }
 
+    /**
+     * Formats confirmed written bytes against total operation size using a shared unit derived
+     * from [totalBytes] (e.g. "0.0 GB / 5.4 GB", "256.0 MB / 700.0 MB").
+     */
+    fun formatWrittenTotal(writtenBytes: Long, totalBytes: Long): String {
+        if (totalBytes <= 0L) return "-- / --"
+        val clampedWritten = writtenBytes.coerceIn(0L, totalBytes)
+        val kb = 1024.0
+        val mb = kb * 1024.0
+        val gb = mb * 1024.0
+        val tb = gb * 1024.0
+        return when {
+            totalBytes >= 1024L * 1024L * 1024L * 1024L ->
+                String.format(Locale.US, "%.1f TB / %.1f TB", clampedWritten / tb, totalBytes / tb)
+            totalBytes >= 1024L * 1024L * 1024L ->
+                String.format(Locale.US, "%.1f GB / %.1f GB", clampedWritten / gb, totalBytes / gb)
+            totalBytes >= 1024L * 1024L ->
+                String.format(Locale.US, "%.1f MB / %.1f MB", clampedWritten / mb, totalBytes / mb)
+            totalBytes >= 1024L ->
+                String.format(Locale.US, "%.1f KB / %.1f KB", clampedWritten / kb, totalBytes / kb)
+            else -> "$clampedWritten B / $totalBytes B"
+        }
+    }
+
     fun formatDecimalCapacity(bytes: Long): String {
         if (bytes <= 0L) return "Unknown"
         val gb = bytes / 1_000_000_000.0
@@ -186,6 +210,18 @@ object ByteUtils {
             String.format(Locale.US, "%dh %02dm %02ds", hours, minutes, seconds)
         } else {
             String.format(Locale.US, "%02dm %02ds", minutes, seconds)
+        }
+    }
+
+    fun formatElapsedClock(totalSeconds: Long): String {
+        val clamped = totalSeconds.coerceAtLeast(0L)
+        val hours = clamped / 3600L
+        val minutes = (clamped % 3600L) / 60L
+        val seconds = clamped % 60L
+        return if (hours > 0L) {
+            String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            String.format(Locale.US, "%02d:%02d", minutes, seconds)
         }
     }
 }

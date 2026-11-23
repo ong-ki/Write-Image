@@ -1,0 +1,43 @@
+# Gradle & Kotlin build caches / outputs
+.gradle/
+.kotlin/
+**/build/
+build/
+
+# Android Studio / IntelliJ IDE files
+.idea/
+*.iml
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local environment & signing credentials (NEVER commit)
+local.properties
+keystore.properties
+signing.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+.env
+.env.*
+
+# Generated packages, bytecode, logs & build reports
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.log
+*.hprof
+mapping.txt
+
+# OS & editor temporary files
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.tmp

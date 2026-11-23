@@ -16,11 +16,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.usbbootable.creator.ui.theme.GlassDialogShape
+import com.usbbootable.creator.ui.theme.glassDialogContainerColor
+import com.usbbootable.creator.ui.theme.glassDialogEnter
 
 @Composable
 fun TechnicalGuideDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
+        shape = GlassDialogShape,
+        containerColor = glassDialogContainerColor(),
+        modifier = Modifier.glassDialogEnter(),
         title = {
             Text(
                 text = "Technical Architecture & Compatibility",
@@ -37,7 +43,7 @@ fun TechnicalGuideDialog(onDismiss: () -> Unit) {
                 GuideSection(
                     title = "1. No-Root USB Writing (USB Host API + SCSI BOT)",
                     body = "Standard Android blocks direct access to /dev/block/* via Linux permissions and SELinux. " +
-                        "Instead of requiring root, USB Bootable Creator uses Android's official USB Host API " +
+                        "Instead of requiring root, Write-Image uses Android's official USB Host API " +
                         "(UsbManager + UsbDeviceConnection) to claim the USB Mass Storage Bulk-Only Transport " +
                         "(BOT, class 0x08 / subclass 0x06 / protocol 0x50) interface and issue real SCSI commands " +
                         "(INQUIRY, READ CAPACITY, READ(10/16), WRITE(10/16), SYNCHRONIZE CACHE) directly to the USB flash drive."

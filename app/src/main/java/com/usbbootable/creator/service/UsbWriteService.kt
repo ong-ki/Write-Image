@@ -8,12 +8,13 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.net.toUri
 import com.usbbootable.creator.MainActivity
 import com.usbbootable.creator.R
 import com.usbbootable.creator.UsbBootableApp
@@ -27,6 +28,7 @@ import com.usbbootable.creator.core.writer.WritePhase
 import com.usbbootable.creator.core.writer.WriteProgress
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -42,35 +44,58 @@ import java.util.concurrent.atomic.AtomicBoolean
 class UsbWriteService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val jobLock = Any()
+    private val wakeLockLock = Any()
     private var activeJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val app: UsbBootableApp
         get() = application as UsbBootableApp
 
+    override fun onCreate() {
+        super.onCreate()
+        activeInstance = this
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_CANCEL -> {
-                app.logger.warn(TAG, "Instant cancel requested from UI/notification.")
-                app.writeStateStore.requestCancel()
-                activeJob?.cancel(CancellationException("Cancelled by user"))
+                handleCancelInternal(startId)
                 return START_NOT_STICKY
             }
 
             ACTION_START_WRITE -> {
-                if (activeJob?.isActive == true) {
+                val alreadyActive = synchronized(jobLock) { activeJob?.isActive == true }
+                if (alreadyActive) {
                     app.logger.warn(TAG, "Write job already in progress; ignoring duplicate start.")
                     return START_NOT_STICKY
                 }
+                ensureNotificationChannel()
                 val jobSpec = app.writeStateStore.pendingJob
                 if (jobSpec == null) {
-                    stopSelf()
+                    // startWrite() uses startForegroundService(); satisfy Android's foreground
+                    // contract before stopping when the pending job was cleared before dispatch.
+                    try {
+                        ServiceCompat.startForeground(
+                            this,
+                            NOTIFICATION_ID,
+                            buildProgressNotification(
+                                WriteProgress(
+                                    phase = WritePhase.PREPARING,
+                                    statusMessage = "Stopping USB write service..."
+                                )
+                            ),
+                            foregroundServiceType()
+                        )
+                    } catch (_: Exception) {
+                    }
+                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                    stopSelf(startId)
                     return START_NOT_STICKY
                 }
 
-                ensureNotificationChannel()
                 val initialProgress = WriteProgress(
                     phase = WritePhase.PREPARING,
                     overallProgress = 0f,
@@ -79,32 +104,79 @@ class UsbWriteService : Service() {
                     sourceIsoName = jobSpec.isoInfo.displayName,
                     bootSupport = jobSpec.isoInfo.bootSupport
                 )
-                app.writeStateStore.cancelRequested.set(false)
+                app.writeStateStore.prepareForNewWrite()
                 app.writeStateStore.updateProgress(initialProgress)
 
-                val fgType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                } else {
-                    0
+                try {
+                    ServiceCompat.startForeground(
+                        this,
+                        NOTIFICATION_ID,
+                        buildProgressNotification(initialProgress),
+                        foregroundServiceType()
+                    )
+                } catch (e: Exception) {
+                    app.logger.error(TAG, "Unable to enter foreground service state: ${e.message}")
+                    app.writeStateStore.pendingJob = null
+                    app.writeStateStore.updateProgress(
+                        WriteProgress(
+                            phase = WritePhase.FAILED,
+                            totalBytes = jobSpec.isoInfo.sizeBytes,
+                            statusMessage = "Unable to start the USB write foreground service.",
+                            targetDeviceName = jobSpec.driveInfo.displayName,
+                            sourceIsoName = jobSpec.isoInfo.displayName,
+                            bootSupport = jobSpec.isoInfo.bootSupport,
+                            errorMessage = e.message ?: "Foreground service start was blocked by Android."
+                        )
+                    )
+                    stopSelf(startId)
+                    return START_NOT_STICKY
                 }
-                ServiceCompat.startForeground(
-                    this,
-                    NOTIFICATION_ID,
-                    buildProgressNotification(initialProgress),
-                    fgType
-                )
 
                 startWriteWorker(jobSpec)
+            }
+
+            else -> {
+                val hasActiveJob = synchronized(jobLock) { activeJob?.isActive == true }
+                if (!hasActiveJob) {
+                    stopSelf(startId)
+                }
             }
         }
         return START_NOT_STICKY
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        app.logger.error(TAG, "Foreground service dataSync time limit reached; cancelling active USB transfer safely.")
+        handleCancelInternal(startId)
+    }
+
+    private fun foregroundServiceType(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        } else {
+            0
+        }
+
+    private fun handleCancelInternal(startId: Int? = null) {
+        app.logger.warn(TAG, "Instant cancel requested from UI/notification.")
+        app.writeStateStore.requestCancel()
+        val job = synchronized(jobLock) { activeJob }
+        if (job != null && !job.isCompleted) {
+            job.cancel(CancellationException("Cancelled by user"))
+        } else {
+            // No write worker is running: release the started service instead of leaking it.
+            app.writeStateStore.pendingJob = null
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            if (startId != null) stopSelf(startId) else stopSelf()
+        }
+    }
+
     private fun startWriteWorker(jobSpec: PendingWriteJob) {
         val targetDeviceId = jobSpec.driveInfo.deviceId
         val disconnectedFlag = AtomicBoolean(false)
-        val startedAtMs = System.currentTimeMillis()
+        val startedAtNanos = System.nanoTime()
         var lastWrittenBytes = 0L
+        var lastOverallProgress = 0f
 
         // Observe live USB disconnect broadcasts for immediate abort
         val disconnectWatcher = serviceScope.launch {
@@ -115,7 +187,34 @@ class UsbWriteService : Service() {
             }
         }
 
-        activeJob = serviceScope.launch {
+        // Cleanup must run even if cancellation lands before the coroutine body is first dispatched,
+        // and must only tear down shared service state when this job is still the active job.
+        val cleanupDone = AtomicBoolean(false)
+        val cleanup: (Job) -> Unit = { finishedJob ->
+            if (cleanupDone.compareAndSet(false, true)) {
+                disconnectWatcher.cancel()
+                val isCurrentJob = synchronized(jobLock) {
+                    if (activeJob === finishedJob) {
+                        activeJob = null
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (isCurrentJob) {
+                    app.usbMonitor.setWriteActive(false)
+                    if (app.writeStateStore.pendingJob === jobSpec) {
+                        app.writeStateStore.pendingJob = null
+                    }
+                    releaseWakeLock()
+                    ServiceCompat.stopForeground(this@UsbWriteService, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
+        }
+
+        lateinit var job: Job
+        job = serviceScope.launch(start = CoroutineStart.LAZY) {
             acquireWakeLock()
             app.usbMonitor.setWriteActive(true)
             var lastNotificationMs = 0L
@@ -124,7 +223,7 @@ class UsbWriteService : Service() {
                 val usbDevice = app.usbMonitor.getUsbDevice(targetDeviceId)
                     ?: throw IllegalStateException("Selected USB drive is no longer connected.")
 
-                val uri = Uri.parse(jobSpec.isoInfo.uriString)
+                val uri = jobSpec.isoInfo.uriString.toUri()
                 val orchestrator = BootableUsbOrchestrator(app.logger)
                 val isCancelledCheck = { app.writeStateStore.cancelRequested.get() }
                 val isDisconnectedCheck = {
@@ -147,37 +246,78 @@ class UsbWriteService : Service() {
                             targetDeviceName = jobSpec.driveInfo.displayName,
                             bufferSizeBytes = session.recommendedBufferBytes,
                             verifyAfterWrite = jobSpec.verifyAfterWrite,
+                            windowsBypassOptions = jobSpec.windowsBypassOptions,
                             isCancelled = isCancelledCheck,
                             isDisconnected = isDisconnectedCheck,
                             onProgress = { progress ->
-                                if (progress.phase == WritePhase.WRITING && progress.bytesProcessed > lastWrittenBytes) {
-                                    lastWrittenBytes = progress.bytesProcessed
+                                val written = maxOf(
+                                    progress.bytesWritten,
+                                    if (progress.phase == WritePhase.WRITING || progress.phase == WritePhase.FLUSHING_CACHE) {
+                                        progress.bytesProcessed
+                                    } else {
+                                        0L
+                                    }
+                                )
+                                if (written > lastWrittenBytes) {
+                                    lastWrittenBytes = written
+                                }
+                                if (progress.overallProgress.isFinite() && progress.overallProgress > lastOverallProgress) {
+                                    lastOverallProgress = progress.overallProgress.coerceIn(0f, 0.995f)
                                 }
                                 app.writeStateStore.updateProgress(progress)
-                                val nowMs = System.currentTimeMillis()
-                                if (!progress.phase.isActive || nowMs - lastNotificationMs >= NOTIFICATION_THROTTLE_MS) {
-                                    lastNotificationMs = nowMs
-                                    notifyUpdate(progress)
+                                if (progress.phase.isActive) {
+                                    val nowMs = SystemClock.elapsedRealtime()
+                                    if (nowMs - lastNotificationMs >= NOTIFICATION_THROTTLE_MS) {
+                                        lastNotificationMs = nowMs
+                                        notifyUpdate(progress)
+                                    }
                                 }
                             }
                         )
-                        recordHistory(jobSpec, finalProgress, startedAtMs, maxOf(lastWrittenBytes, finalProgress.bytesProcessed))
+                        recordHistory(jobSpec, finalProgress, startedAtNanos, maxOf(lastWrittenBytes, finalProgress.bytesWritten))
                         postCompletionNotification(finalProgress)
                     }
                 }
             } catch (e: CancellationException) {
-                val cancelled = WriteProgress(
-                    phase = WritePhase.CANCELLED,
-                    bytesProcessed = lastWrittenBytes,
-                    totalBytes = jobSpec.isoInfo.sizeBytes,
-                    statusMessage = "Cancelled. USB drive was safely released; re-flash or reformat before use.",
-                    targetDeviceName = jobSpec.driveInfo.displayName,
-                    sourceIsoName = jobSpec.isoInfo.displayName,
-                    bootSupport = jobSpec.isoInfo.bootSupport
-                )
-                app.writeStateStore.updateProgress(cancelled)
-                recordHistory(jobSpec, cancelled, startedAtMs, lastWrittenBytes)
-                postCompletionNotification(cancelled)
+                val disconnected = disconnectedFlag.get() ||
+                    app.writeStateStore.disconnectResetRequested.get() ||
+                    !app.usbMonitor.isDeviceConnected(targetDeviceId)
+                if (disconnected) {
+                    // The UI resets the drive on unplug and may cancel this job to stop I/O
+                    // immediately. Report that terminal state as a disconnect failure, not as
+                    // a user-requested cancellation, so history and notifications stay truthful.
+                    val failed = WriteProgress(
+                        phase = WritePhase.FAILED,
+                        bytesProcessed = lastWrittenBytes,
+                        bytesWritten = lastWrittenBytes,
+                        totalBytes = jobSpec.isoInfo.sizeBytes,
+                        overallProgress = lastOverallProgress,
+                        statusMessage = "USB drive was disconnected during flashing.",
+                        targetDeviceName = jobSpec.driveInfo.displayName,
+                        sourceIsoName = jobSpec.isoInfo.displayName,
+                        bootSupport = jobSpec.isoInfo.bootSupport,
+                        errorMessage = "USB drive disconnected mid-write. Reconnect the drive and re-flash from the beginning."
+                    )
+                    app.logger.error(TAG, "USB write aborted because the drive was disconnected.")
+                    app.writeStateStore.updateProgress(failed)
+                    recordHistory(jobSpec, failed, startedAtNanos, lastWrittenBytes)
+                    postCompletionNotification(failed)
+                } else {
+                    val cancelled = WriteProgress(
+                        phase = WritePhase.CANCELLED,
+                        bytesProcessed = lastWrittenBytes,
+                        bytesWritten = lastWrittenBytes,
+                        totalBytes = jobSpec.isoInfo.sizeBytes,
+                        overallProgress = lastOverallProgress,
+                        statusMessage = "Cancelled. USB drive was safely released; re-flash or reformat before use.",
+                        targetDeviceName = jobSpec.driveInfo.displayName,
+                        sourceIsoName = jobSpec.isoInfo.displayName,
+                        bootSupport = jobSpec.isoInfo.bootSupport
+                    )
+                    app.writeStateStore.updateProgress(cancelled)
+                    recordHistory(jobSpec, cancelled, startedAtNanos, lastWrittenBytes)
+                    postCompletionNotification(cancelled)
+                }
                 // Do not swallow CancellationException
                 throw e
             } catch (e: Exception) {
@@ -185,7 +325,9 @@ class UsbWriteService : Service() {
                 val failed = WriteProgress(
                     phase = WritePhase.FAILED,
                     bytesProcessed = lastWrittenBytes,
+                    bytesWritten = lastWrittenBytes,
                     totalBytes = jobSpec.isoInfo.sizeBytes,
+                    overallProgress = lastOverallProgress,
                     statusMessage = "Unable to start or complete USB flashing.",
                     targetDeviceName = jobSpec.driveInfo.displayName,
                     sourceIsoName = jobSpec.isoInfo.displayName,
@@ -193,27 +335,27 @@ class UsbWriteService : Service() {
                     errorMessage = e.message ?: "Unknown USB or I/O error."
                 )
                 app.writeStateStore.updateProgress(failed)
-                recordHistory(jobSpec, failed, startedAtMs, lastWrittenBytes)
+                recordHistory(jobSpec, failed, startedAtNanos, lastWrittenBytes)
                 postCompletionNotification(failed)
             } finally {
-                disconnectWatcher.cancel()
-                app.usbMonitor.setWriteActive(false)
-                app.writeStateStore.pendingJob = null
-                releaseWakeLock()
-                ServiceCompat.stopForeground(this@UsbWriteService, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                cleanup(job)
             }
         }
+        synchronized(jobLock) {
+            activeJob = job
+        }
+        job.invokeOnCompletion { cleanup(job) }
+        job.start()
     }
 
     private fun recordHistory(
         jobSpec: PendingWriteJob,
         finalProgress: WriteProgress,
-        startedAtMs: Long,
+        startedAtNanos: Long,
         bytesTransferred: Long
     ) {
         val endMs = System.currentTimeMillis()
-        val durationMs = (endMs - startedAtMs).coerceAtLeast(1L)
+        val durationMs = ((System.nanoTime() - startedAtNanos) / 1_000_000L).coerceAtLeast(1L)
         val avgSpeed = if (bytesTransferred > 0L) {
             bytesTransferred.toDouble() / (durationMs.toDouble() / 1000.0)
         } else {
@@ -243,44 +385,51 @@ class UsbWriteService : Service() {
     }
 
     override fun onDestroy() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
+        app.writeStateStore.requestCancel()
         releaseWakeLock()
         serviceScope.cancel()
         super.onDestroy()
     }
 
     private fun acquireWakeLock() {
-        try {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "UsbBootableCreator::UsbWriteWakeLock")
-                .apply {
-                    setReferenceCounted(false)
-                    acquire(2 * 60 * 60 * 1000L) // 2-hour safety ceiling
-                }
-        } catch (_: Exception) {
+        synchronized(wakeLockLock) {
+            try {
+                if (wakeLock?.isHeld == true) return
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "UsbBootableCreator::UsbWriteWakeLock")
+                    .apply {
+                        setReferenceCounted(false)
+                        acquire(2 * 60 * 60 * 1000L) // 2-hour safety ceiling
+                    }
+            } catch (_: Exception) {
+            }
         }
     }
 
     private fun releaseWakeLock() {
-        try {
-            wakeLock?.let { if (it.isHeld) it.release() }
-        } catch (_: Exception) {
-        } finally {
-            wakeLock = null
+        synchronized(wakeLockLock) {
+            try {
+                wakeLock?.let { if (it.isHeld) it.release() }
+            } catch (_: Exception) {
+            } finally {
+                wakeLock = null
+            }
         }
     }
 
     private fun ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                getString(R.string.notification_channel_name),
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = getString(R.string.notification_channel_desc)
-            }
-            nm.createNotificationChannel(channel)
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            getString(R.string.notification_channel_name),
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = getString(R.string.notification_channel_desc)
         }
+        nm.createNotificationChannel(channel)
     }
 
     private fun buildProgressNotification(progress: WriteProgress): Notification {
@@ -304,14 +453,15 @@ class UsbWriteService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val percent = (progress.overallProgress * 100f).toInt().coerceIn(0, 100)
+        val safeFraction = if (progress.overallProgress.isFinite()) progress.overallProgress else 0f
+        val percent = (safeFraction * 100f).toInt().coerceIn(0, 99)
         val title = when (progress.phase) {
             WritePhase.PREPARING -> "Preparing USB Flash..."
             WritePhase.PARTITIONING -> "Partitioning USB Drive..."
             WritePhase.WRITING -> "Writing USB ($percent%)"
             WritePhase.FLUSHING_CACHE -> "Flushing USB Cache..."
             WritePhase.VERIFYING -> "Verifying USB ($percent%)"
-            else -> "USB Bootable Creator"
+            else -> getString(R.string.app_name)
         }
 
         val speedText = if (progress.speedBytesPerSec > 0.0) {
@@ -378,22 +528,45 @@ class UsbWriteService : Service() {
         const val ACTION_START_WRITE = "com.usbbootable.creator.action.START_WRITE"
         const val ACTION_CANCEL = "com.usbbootable.creator.action.CANCEL_WRITE"
 
-        fun startWrite(context: Context) {
+        @Volatile
+        private var activeInstance: UsbWriteService? = null
+
+        /** Returns false when Android blocks the foreground-service start. */
+        fun startWrite(context: Context): Boolean {
             val intent = Intent(context, UsbWriteService::class.java).apply {
                 action = ACTION_START_WRITE
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return try {
                 context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+                true
+            } catch (e: Exception) {
+                (context.applicationContext as? UsbBootableApp)?.logger?.error(
+                    TAG,
+                    "Unable to start USB write foreground service: ${e.message}"
+                )
+                false
             }
         }
 
         fun cancelWrite(context: Context) {
+            val app = context.applicationContext as? UsbBootableApp ?: return
+            val running = activeInstance
+            if (running != null) {
+                running.handleCancelInternal()
+                return
+            }
+            // Nothing to cancel: do not start (and immediately stop) a service just to signal it.
+            if (app.writeStateStore.pendingJob == null) return
             val intent = Intent(context, UsbWriteService::class.java).apply {
                 action = ACTION_CANCEL
             }
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (e: Exception) {
+                // Background-service restrictions can reject the delivery; the cooperative
+                // cancel flag already set by the UI still stops the active transfer safely.
+                app.logger.warn(TAG, "Unable to deliver cancel intent to service: ${e.message}")
+            }
         }
     }
 }

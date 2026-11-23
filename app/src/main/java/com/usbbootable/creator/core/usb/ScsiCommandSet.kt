@@ -98,36 +98,6 @@ object ScsiCommandSet {
         }
     }
 
-    fun write10(lba: Long, blockCount: Int): ByteArray {
-        require(lba in 0L..0xFFFFFFFFL) { "LBA out of WRITE(10) range: $lba" }
-        require(blockCount in 1..0xFFFF) { "Block count out of WRITE(10) range: $blockCount" }
-        return ByteArray(10).apply {
-            this[0] = OP_WRITE_10
-            ByteUtils.writeI32BE(this, 2, lba.toInt())
-            ByteUtils.writeU16BE(this, 7, blockCount)
-        }
-    }
-
-    fun read16(lba: Long, blockCount: Int): ByteArray {
-        require(lba >= 0L) { "Negative LBA: $lba" }
-        require(blockCount > 0) { "Non-positive block count: $blockCount" }
-        return ByteArray(16).apply {
-            this[0] = OP_READ_16
-            ByteUtils.writeI64BE(this, 2, lba)
-            ByteUtils.writeI32BE(this, 10, blockCount)
-        }
-    }
-
-    fun write16(lba: Long, blockCount: Int): ByteArray {
-        require(lba >= 0L) { "Negative LBA: $lba" }
-        require(blockCount > 0) { "Non-positive block count: $blockCount" }
-        return ByteArray(16).apply {
-            this[0] = OP_WRITE_16
-            ByteUtils.writeI64BE(this, 2, lba)
-            ByteUtils.writeI32BE(this, 10, blockCount)
-        }
-    }
-
     fun synchronizeCache10(): ByteArray = ByteArray(10).apply {
         this[0] = OP_SYNCHRONIZE_CACHE_10
     }
@@ -150,31 +120,27 @@ object ScsiCommandSet {
         )
     }
 
-    fun parseSense(data: ByteArray): ScsiSenseData {
-        if (data.size < 14) {
-            return ScsiSenseData(
-                responseCode = if (data.isNotEmpty()) data[0].toInt() and 0x7F else 0,
-                senseKey = if (data.size > 2) data[2].toInt() and 0x0F else 0,
-                asc = 0,
-                ascq = 0
-            )
+    fun parseSense(data: ByteArray, validLength: Int = data.size): ScsiSenseData {
+        val len = validLength.coerceIn(0, data.size)
+        if (len == 0) {
+            return ScsiSenseData(responseCode = 0, senseKey = 0, asc = 0, ascq = 0)
         }
         val responseCode = data[0].toInt() and 0x7F
         return if (responseCode == 0x72 || responseCode == 0x73) {
-            // Descriptor format sense data
+            // Descriptor format sense data (header is 4+ bytes)
             ScsiSenseData(
                 responseCode = responseCode,
-                senseKey = data[1].toInt() and 0x0F,
-                asc = data[2].toInt() and 0xFF,
-                ascq = data[3].toInt() and 0xFF
+                senseKey = if (len > 1) data[1].toInt() and 0x0F else 0,
+                asc = if (len > 2) data[2].toInt() and 0xFF else 0,
+                ascq = if (len > 3) data[3].toInt() and 0xFF else 0
             )
         } else {
             // Fixed format sense data (0x70 / 0x71)
             ScsiSenseData(
                 responseCode = responseCode,
-                senseKey = data[2].toInt() and 0x0F,
-                asc = data[12].toInt() and 0xFF,
-                ascq = data[13].toInt() and 0xFF
+                senseKey = if (len > 2) data[2].toInt() and 0x0F else 0,
+                asc = if (len > 12) data[12].toInt() and 0xFF else 0,
+                ascq = if (len > 13) data[13].toInt() and 0xFF else 0
             )
         }
     }
@@ -200,6 +166,9 @@ object ScsiCommandSet {
             throw UsbStorageException("READ CAPACITY (16) response too short: ${data.size} bytes")
         }
         val lastLba = ByteUtils.readI64BE(data, 0)
+        if (lastLba < 0L || lastLba == Long.MAX_VALUE) {
+            throw UsbStorageException("READ CAPACITY (16) lastLba out of range: $lastLba")
+        }
         val blockSize = ByteUtils.readI32BE(data, 8)
         return Pair(lastLba + 1L, blockSize)
     }

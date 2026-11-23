@@ -15,6 +15,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import java.io.IOException
 import java.security.MessageDigest
 import kotlin.random.Random
 
@@ -209,6 +210,30 @@ class ScsiAndBotProtocolTest {
         }
     }
 
+    @Test
+    fun syncCachePropagatesTransportFailureInsteadOfReportingSuccess() {
+        val mockUsb = VirtualUsbScsiFlashDrive(
+            totalBlocks = 64,
+            blockSize = 512,
+            failSyncCacheWithIoErrorOnce = true
+        )
+        val dev = ScsiBlockDevice(
+            transport = UsbBotTransport(io = mockUsb, sleepMs = {}),
+            sleepMs = {}
+        )
+        dev.initialize()
+
+        try {
+            dev.syncCache()
+            fail("Expected UsbStorageException when the cache flush transport fails")
+        } catch (e: UsbStorageException) {
+            assertTrue(
+                "Expected a cache-flush diagnostic, got: ${e.message}",
+                e.message?.contains("flush", ignoreCase = true) == true
+            )
+        }
+    }
+
     /**
      * Spec-accurate virtual USB BOT + SCSI flash drive emulator supporting fault injection
      * for CSW `read=1` / stall conditions, partial bulkOut transfers, and BOT Reset Recovery.
@@ -221,7 +246,8 @@ class ScsiAndBotProtocolTest {
         private var failCswWithRead1OnFirst64KWrite: Boolean = false,
         private val maxAcceptedBulkOutSlice: Int = Int.MAX_VALUE,
         private var injectStray1ByteBeforeCswOnce: Boolean = false,
-        private val permanentCswFailureOnWrites: Boolean = false
+        private val permanentCswFailureOnWrites: Boolean = false,
+        private var failSyncCacheWithIoErrorOnce: Boolean = false
     ) : UsbBulkIo {
 
         override val interfaceId: Int = 0
@@ -324,6 +350,11 @@ class ScsiAndBotProtocolTest {
             pendingInData = ByteArray(0)
             pendingInOffset = 0
             pendingStatus = UsbBotTransport.CSW_STATUS_PASSED
+
+            if (opcode == ScsiCommandSet.OP_SYNCHRONIZE_CACHE_10 && failSyncCacheWithIoErrorOnce) {
+                failSyncCacheWithIoErrorOnce = false
+                throw IOException("Simulated SYNCHRONIZE CACHE transport failure")
+            }
 
             when (opcode) {
                 ScsiCommandSet.OP_INQUIRY -> {

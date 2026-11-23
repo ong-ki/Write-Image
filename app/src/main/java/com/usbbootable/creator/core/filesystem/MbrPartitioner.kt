@@ -24,12 +24,16 @@ object MbrPartitioner {
         partitionType: Int = TYPE_FAT32_LBA
     ): PartitionRange {
         val blockSize = device.blockSize
+        require(blockSize in 512..(1024 * 1024) && (blockSize and (blockSize - 1)) == 0) {
+            "Unsupported block size for MBR partitioning: $blockSize"
+        }
         val alignSectors = (1024L * 1024L) / blockSize.toLong() // 2048 sectors for 512B blocks
         val startLba = alignSectors
         val maxMbrSectors = 0xFFFFFFFFL
         val available = device.totalBlocks - startLba
-        if (available < 65_536L) {
-            throw IOException("USB drive is too small to create a FAT32 partition.")
+        // 65,525 clusters + 32 reserved + 2*512 FAT sectors ~= 67,000 sectors safe floor
+        if (available < 67_000L) {
+            throw IOException("USB drive is too small to create a valid FAT32 partition.")
         }
         val partSectors = minOf(available, maxMbrSectors)
 

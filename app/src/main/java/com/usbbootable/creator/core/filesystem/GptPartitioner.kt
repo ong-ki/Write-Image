@@ -50,9 +50,17 @@ object GptPartitioner {
         require(lastUsableLba > firstUsableLba) { "Device too small for GPT." }
         require(partitions.isNotEmpty() && partitions.size <= NUM_PART_ENTRIES)
 
-        for (p in partitions) {
+        val sorted = partitions.sortedBy { it.startLba }
+        for (idx in sorted.indices) {
+            val p = sorted[idx]
             require(p.startLba >= firstUsableLba && p.endLbaInclusive <= lastUsableLba && p.startLba <= p.endLbaInclusive) {
                 "Partition '${p.name}' [${p.startLba}..${p.endLbaInclusive}] outside usable GPT range [$firstUsableLba..$lastUsableLba]"
+            }
+            if (idx > 0) {
+                val prev = sorted[idx - 1]
+                require(prev.endLbaInclusive < p.startLba) {
+                    "Overlapping GPT partitions '${prev.name}' and '${p.name}'"
+                }
             }
         }
 
@@ -132,19 +140,27 @@ object GptPartitioner {
         device: BlockDevice,
         espSizeBytes: Long
     ): Pair<GptPartitionSpec, GptPartitionSpec> {
-        val blockSize = device.blockSize.toLong()
-        val alignSectors = (1024L * 1024L) / blockSize // 1 MiB alignment
+        val blockSizeInt = device.blockSize
+        require(blockSizeInt >= 512 && (blockSizeInt and (blockSizeInt - 1)) == 0 && PART_ARRAY_BYTES % blockSizeInt == 0) {
+            "Unsupported block size for GPT dual layout: $blockSizeInt"
+        }
+        val blockSize = blockSizeInt.toLong()
+        val alignSectors = ((1024L * 1024L) / blockSize).coerceAtLeast(1L) // 1 MiB alignment
         val arraySectors = PART_ARRAY_BYTES / blockSize
         val lastUsableLba = device.totalBlocks - 2L - arraySectors
+        if (lastUsableLba <= alignSectors) {
+            throw IOException("USB drive is too small for dual-partition Windows UEFI layout.")
+        }
 
         val espStart = alignSectors
         val requestedEspSectors = ((espSizeBytes + (1024L * 1024L - 1)) / (1024L * 1024L)) * alignSectors
-        val minEspSectors = (64L * 1024L * 1024L) / blockSize // At least 64 MiB for valid FAT32 >= 65525 clusters
+        val minByBytes = (64L * 1024L * 1024L) / blockSize
+        val minByClusters = ((65_525L + 1024L + alignSectors - 1L) / alignSectors) * alignSectors
+        val minEspSectors = maxOf(minByBytes, minByClusters) // >= 64 MiB and >= 65525 clusters even on 4Kn drives
         val espSectors = maxOf(requestedEspSectors, minEspSectors)
         val espEnd = espStart + espSectors - 1L
 
         val dataStart = espEnd + 1L
-        // Align data end down to whole blocks within lastUsableLba
         val dataEnd = lastUsableLba
         if (dataEnd <= dataStart + alignSectors) {
             throw IOException("USB drive is too small for dual-partition Windows UEFI layout.")

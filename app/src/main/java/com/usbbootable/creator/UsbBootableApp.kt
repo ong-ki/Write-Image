@@ -2,6 +2,7 @@ package com.usbbootable.creator
 
 import android.app.Application
 import com.usbbootable.creator.core.storage.AppPreferencesStore
+import com.usbbootable.creator.core.storage.CustomizationDataStore
 import com.usbbootable.creator.core.usb.UsbDeviceMonitor
 import com.usbbootable.creator.core.util.OperationLogger
 import com.usbbootable.creator.service.UsbWriteStateStore
@@ -14,6 +15,9 @@ class UsbBootableApp : Application() {
     lateinit var preferencesStore: AppPreferencesStore
         private set
 
+    lateinit var customizationStore: CustomizationDataStore
+        private set
+
     lateinit var usbMonitor: UsbDeviceMonitor
         private set
 
@@ -24,9 +28,10 @@ class UsbBootableApp : Application() {
         super.onCreate()
         logger = OperationLogger()
         preferencesStore = AppPreferencesStore(this)
+        customizationStore = CustomizationDataStore(this)
         writeStateStore = UsbWriteStateStore()
         usbMonitor = UsbDeviceMonitor(this, logger)
-        usbMonitor.startMonitoring()
-        logger.info("App", "USB Bootable Creator initialized (USB OTG Host supported=${usbMonitor.isUsbHostSupported})")
+        usbMonitor.startMonitoring(initialRefresh = false)
+        logger.info("App", "Write-Image initialized (USB OTG Host supported=${usbMonitor.isUsbHostSupported})")
     }
 }

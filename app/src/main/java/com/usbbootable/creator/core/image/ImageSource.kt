@@ -23,6 +23,9 @@ interface ImageSource : Closeable {
 
     @Throws(IOException::class)
     fun readExact(position: Long, buffer: ByteArray, offset: Int = 0, length: Int = buffer.size - offset) {
+        require(offset >= 0 && length >= 0 && offset <= buffer.size && length <= buffer.size - offset) {
+            "Invalid readExact range: offset=$offset, length=$length, bufferSize=${buffer.size}"
+        }
         var total = 0
         while (total < length) {
             val n = readAt(position + total, buffer, offset + total, length - total)
@@ -38,8 +41,21 @@ interface ImageSource : Closeable {
 
 class FileChannelImageSource(file: File) : ImageSource {
     private val raf = RandomAccessFile(file, "r")
-    private val channel: FileChannel = raf.channel
-    override val sizeBytes: Long = channel.size()
+    private val channel: FileChannel
+    override val sizeBytes: Long
+
+    init {
+        try {
+            channel = raf.channel
+            sizeBytes = channel.size()
+        } catch (e: Throwable) {
+            try {
+                raf.close()
+            } catch (_: Exception) {
+            }
+            throw e
+        }
+    }
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
         if (position < 0 || position >= sizeBytes) return -1
@@ -63,7 +79,9 @@ class ByteArrayImageSource(private val data: ByteArray) : ImageSource {
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
         if (position < 0 || position >= sizeBytes) return -1
+        if (length <= 0) return 0
         val toRead = minOf(length.toLong(), sizeBytes - position).toInt()
+        if (toRead <= 0) return 0
         System.arraycopy(data, position.toInt(), buffer, offset, toRead)
         return toRead
     }
@@ -85,31 +103,41 @@ class SafImageSource(
     private val pfd: ParcelFileDescriptor = context.contentResolver.openFileDescriptor(uri, "r")
         ?: throw IOException("Cannot open selected ISO file. Please re-select the file.")
 
-    private val fis = FileInputStream(pfd.fileDescriptor)
-    private val channel: FileChannel = fis.channel
+    private val fis: FileInputStream
+    private val channel: FileChannel
 
     override val sizeBytes: Long
 
     init {
-        val detectedSize = try {
-            val chSize = channel.size()
-            if (chSize > 0L) chSize else pfd.statSize
-        } catch (_: Exception) {
-            pfd.statSize
-        }
-        sizeBytes = if (detectedSize > 0L) detectedSize else knownSizeBytes
-        if (sizeBytes <= 0L) {
-            close()
-            throw IOException(
-                "Unable to determine ISO file size or file is empty. Ensure the ISO is stored locally on device storage."
-            )
-        }
-        // Verify the descriptor supports positional reads (rejects non-seekable virtual cloud streams)
         try {
+            fis = FileInputStream(pfd.fileDescriptor)
+            channel = fis.channel
+            val detectedSize = try {
+                val chSize = channel.size()
+                if (chSize > 0L) chSize else pfd.statSize
+            } catch (_: Exception) {
+                pfd.statSize
+            }
+            sizeBytes = if (detectedSize > 0L) detectedSize else knownSizeBytes
+            if (sizeBytes <= 0L) {
+                throw IOException(
+                    "Unable to determine ISO file size or file is empty. Ensure the ISO is stored locally on device storage."
+                )
+            }
+            // Verify the descriptor supports positional reads (rejects non-seekable virtual cloud streams)
             val probe = ByteBuffer.allocate(1)
             channel.read(probe, 0L)
+        } catch (e: IOException) {
+            try {
+                pfd.close()
+            } catch (_: Exception) {
+            }
+            throw e
         } catch (e: Exception) {
-            close()
+            try {
+                pfd.close()
+            } catch (_: Exception) {
+            }
             throw IOException(
                 "Selected file is not directly seekable. Copy the ISO to local internal storage (e.g., Downloads) first.",
                 e

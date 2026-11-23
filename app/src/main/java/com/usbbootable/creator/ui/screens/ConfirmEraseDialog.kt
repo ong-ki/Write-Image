@@ -32,6 +32,9 @@ import androidx.compose.ui.unit.dp
 import com.usbbootable.creator.core.image.SelectedIsoInfo
 import com.usbbootable.creator.core.usb.UsbDriveInfo
 import com.usbbootable.creator.core.util.ByteUtils
+import com.usbbootable.creator.ui.theme.GlassDialogShape
+import com.usbbootable.creator.ui.theme.glassDialogContainerColor
+import com.usbbootable.creator.ui.theme.glassDialogEnter
 
 @Composable
 fun ConfirmEraseDialog(
@@ -41,11 +44,17 @@ fun ConfirmEraseDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    var eraseConfirmed by remember { mutableStateOf(false) }
-    var nonBootableConfirmed by remember { mutableStateOf(!requiresNonBootableAck) }
+    var eraseConfirmed by remember(iso.uriString, drive.deviceId) { mutableStateOf(false) }
+    var nonBootableConfirmed by remember(iso.uriString, drive.deviceId, requiresNonBootableAck) {
+        mutableStateOf(!requiresNonBootableAck)
+    }
+    var submitted by remember(iso.uriString, drive.deviceId) { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        shape = GlassDialogShape,
+        containerColor = glassDialogContainerColor(),
+        modifier = Modifier.glassDialogEnter(),
         icon = {
             Icon(
                 imageVector = Icons.Rounded.Warning,
@@ -166,8 +175,13 @@ fun ConfirmEraseDialog(
         },
         confirmButton = {
             Button(
-                onClick = onConfirm,
-                enabled = eraseConfirmed && nonBootableConfirmed,
+                onClick = {
+                    if (!submitted) {
+                        submitted = true
+                        onConfirm()
+                    }
+                },
+                enabled = !submitted && eraseConfirmed && nonBootableConfirmed,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.error,
                     contentColor = MaterialTheme.colorScheme.onError

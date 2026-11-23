@@ -10,8 +10,6 @@ import java.io.IOException
  */
 class UdfReader private constructor(
     private val source: ImageSource,
-    private val blockSize: Int,
-    private val partitionMapToStartSector: Map<Int, Long>,
     override val volumeLabel: String,
     override val entries: List<ImageEntry>
 ) : ImageFileSystem {
@@ -35,6 +33,7 @@ class UdfReader private constructor(
         consumer: (data: ByteArray, length: Int) -> Unit
     ) {
         require(!entry.isDirectory) { "Cannot stream directory entry: ${entry.path}" }
+        require(buffer.isNotEmpty()) { "Stream buffer must not be empty" }
         val handle = entry.opaqueHandle as? UdfFileHandle
             ?: throw IOException("Invalid UDF handle for ${entry.path}")
 
@@ -92,6 +91,8 @@ class UdfReader private constructor(
 
     companion object {
         private const val SECTOR_SIZE = 2048
+        private const val MAX_DIRECTORY_BYTES = 32L * 1024L * 1024L
+        private const val MAX_ENTRIES = 100_000
 
         private const val TAG_AVDP = 2
         private const val TAG_PARTITION_DESC = 5
@@ -183,17 +184,18 @@ class UdfReader private constructor(
                         fsdLbn = ByteUtils.readU32LE(sectorBuf, 248 + 4)
                         fsdPartRef = ByteUtils.readU16LE(sectorBuf, 248 + 8)
 
-                        val mapTableLen = ByteUtils.readU32LE(sectorBuf, 264).toInt()
-                        val numMaps = ByteUtils.readU32LE(sectorBuf, 268).toInt()
+                        val mapTableLen = ByteUtils.readU32LE(sectorBuf, 264)
+                        val numMaps = ByteUtils.readU32LE(sectorBuf, 268)
                         var mapOff = 440
-                        var refIdx = 0
-                        while (refIdx < numMaps && mapOff + 2 <= 440 + mapTableLen && mapOff + 2 <= SECTOR_SIZE) {
+                        val mapLimit = minOf(SECTOR_SIZE.toLong(), 440L + mapTableLen).toInt()
+                        var refIdx = 0L
+                        while (refIdx < numMaps && mapOff + 2 <= mapLimit) {
                             val mapType = sectorBuf[mapOff].toInt() and 0xFF
                             val mapLen = sectorBuf[mapOff + 1].toInt() and 0xFF
                             if (mapLen <= 0 || mapOff + mapLen > SECTOR_SIZE) break
                             if (mapType == 1 && mapLen >= 6) {
                                 val pNum = ByteUtils.readU16LE(sectorBuf, mapOff + 4)
-                                partRefToPartNum[refIdx] = pNum
+                                partRefToPartNum[refIdx.toInt()] = pNum
                             }
                             mapOff += mapLen
                             refIdx++
@@ -207,21 +209,22 @@ class UdfReader private constructor(
                 throw IOException("Incomplete UDF Volume Descriptor Sequence.")
             }
 
-            val partRefToStartSector = mutableMapOf<Int, Long>()
+            val partRefToStartBytes = mutableMapOf<Int, Long>()
             if (partRefToPartNum.isEmpty()) {
                 val firstStart = partNumToStart.values.first()
-                partRefToStartSector[0] = firstStart
+                partRefToStartBytes[0] = firstStart * SECTOR_SIZE.toLong()
             } else {
                 for ((ref, pNum) in partRefToPartNum) {
                     val start = partNumToStart[pNum] ?: partNumToStart.values.first()
-                    partRefToStartSector[ref] = start
+                    partRefToStartBytes[ref] = start * SECTOR_SIZE.toLong()
                 }
             }
 
             // 3. Read File Set Descriptor (FSD)
-            val fsdSector = (partRefToStartSector[fsdPartRef] ?: partNumToStart.values.first()) + fsdLbn
+            val fsdOffset = (partRefToStartBytes[fsdPartRef] ?: partRefToStartBytes.values.first()) +
+                fsdLbn * logicalBlockSize.toLong()
             val fsdBuf = ByteArray(logicalBlockSize)
-            source.readExact(fsdSector * logicalBlockSize.toLong(), fsdBuf, 0, logicalBlockSize)
+            source.readExact(fsdOffset, fsdBuf, 0, logicalBlockSize)
             if (ByteUtils.readU16LE(fsdBuf, 0) != TAG_FILE_SET_DESC) {
                 throw IOException("Invalid UDF File Set Descriptor tag.")
             }
@@ -240,7 +243,7 @@ class UdfReader private constructor(
                 val icbKey = (dirPartRef.toLong() shl 40) or dirLbn
                 if (!visitedIcbs.add(icbKey)) continue
 
-                val dirFe = readFileEntry(source, logicalBlockSize, partRefToStartSector, dirLbn, dirPartRef)
+                val dirFe = readFileEntry(source, logicalBlockSize, partRefToStartBytes, dirLbn, dirPartRef)
                 val dirBytes = readAllExtentsToByteArray(source, dirFe)
 
                 var pos = 0
@@ -263,7 +266,10 @@ class UdfReader private constructor(
 
                     if (!isDeleted && !isParent && lenFi > 0) {
                         val name = decodeCs0(dirBytes, pos + 38 + lenIu, lenFi)
-                        if (name.isNotEmpty() && name != "." && name != "..") {
+                        if (name.isNotEmpty() && isSafeEntryName(name)) {
+                            if (entries.size >= MAX_ENTRIES) {
+                                throw IOException("UDF entry limit exceeded ($MAX_ENTRIES entries).")
+                            }
                             val fullPath = if (parentPath.isEmpty()) name else "$parentPath/$name"
                             if (isDir) {
                                 entries.add(
@@ -280,7 +286,7 @@ class UdfReader private constructor(
                                 val fileFe = readFileEntry(
                                     source,
                                     logicalBlockSize,
-                                    partRefToStartSector,
+                                    partRefToStartBytes,
                                     childLbn,
                                     childPartRef
                                 )
@@ -303,8 +309,6 @@ class UdfReader private constructor(
 
             return UdfReader(
                 source = source,
-                blockSize = logicalBlockSize,
-                partitionMapToStartSector = partRefToStartSector,
                 volumeLabel = volumeLabel,
                 entries = entries
             )
@@ -313,13 +317,13 @@ class UdfReader private constructor(
         private fun readFileEntry(
             source: ImageSource,
             blockSize: Int,
-            partRefToStart: Map<Int, Long>,
+            partRefToStartBytes: Map<Int, Long>,
             lbn: Long,
             partRef: Int
         ): UdfFileHandle {
-            val partStart = partRefToStart[partRef] ?: partRefToStart.values.first()
+            val partStartBytes = partRefToStartBytes[partRef] ?: partRefToStartBytes.values.first()
             val feBuf = ByteArray(blockSize)
-            source.readExact((partStart + lbn) * blockSize.toLong(), feBuf, 0, blockSize)
+            source.readExact(partStartBytes + lbn * blockSize.toLong(), feBuf, 0, blockSize)
 
             val tagId = ByteUtils.readU16LE(feBuf, 0)
             if (tagId != TAG_FILE_ENTRY && tagId != TAG_EXTENDED_FILE_ENTRY) {
@@ -329,23 +333,31 @@ class UdfReader private constructor(
             val icbFlags = ByteUtils.readU16LE(feBuf, 34)
             val adType = icbFlags and 0x07
             val infoLength = ByteUtils.readI64LE(feBuf, 56)
+            if (infoLength < 0L) {
+                throw IOException("Invalid negative UDF informationLength ($infoLength) at LBN=$lbn")
+            }
 
-            val lenEa: Int
-            val lenAd: Int
-            val adStart: Int
+            val lenEaLong: Long
+            val lenAdLong: Long
+            val baseOff: Long
             if (tagId == TAG_FILE_ENTRY) {
-                lenEa = ByteUtils.readU32LE(feBuf, 168).toInt()
-                lenAd = ByteUtils.readU32LE(feBuf, 172).toInt()
-                adStart = 176 + lenEa
+                lenEaLong = ByteUtils.readU32LE(feBuf, 168)
+                lenAdLong = ByteUtils.readU32LE(feBuf, 172)
+                baseOff = 176L
             } else {
-                lenEa = ByteUtils.readU32LE(feBuf, 208).toInt()
-                lenAd = ByteUtils.readU32LE(feBuf, 212).toInt()
-                adStart = 216 + lenEa
+                lenEaLong = ByteUtils.readU32LE(feBuf, 208)
+                lenAdLong = ByteUtils.readU32LE(feBuf, 212)
+                baseOff = 216L
             }
 
-            if (adStart < 0 || adStart + lenAd > feBuf.size) {
-                throw IOException("UDF allocation descriptor bounds out of block: start=$adStart len=$lenAd")
+            val adStartLong = baseOff + lenEaLong
+            if (lenEaLong < 0L || lenAdLong < 0L || adStartLong < 0L ||
+                adStartLong > feBuf.size.toLong() || lenAdLong > feBuf.size.toLong() - adStartLong
+            ) {
+                throw IOException("UDF allocation descriptor bounds out of block: start=$adStartLong len=$lenAdLong")
             }
+            val adStart = adStartLong.toInt()
+            val lenAd = lenAdLong.toInt()
 
             val extents = mutableListOf<UdfExtent>()
             if (adType == 3) {
@@ -357,7 +369,7 @@ class UdfReader private constructor(
                 parseAllocationDescriptors(
                     source = source,
                     blockSize = blockSize,
-                    partRefToStart = partRefToStart,
+                    partRefToStartBytes = partRefToStartBytes,
                     defaultPartRef = partRef,
                     adType = adType,
                     buf = feBuf,
@@ -374,7 +386,7 @@ class UdfReader private constructor(
         private fun parseAllocationDescriptors(
             source: ImageSource,
             blockSize: Int,
-            partRefToStart: Map<Int, Long>,
+            partRefToStartBytes: Map<Int, Long>,
             defaultPartRef: Int,
             adType: Int,
             buf: ByteArray,
@@ -402,6 +414,8 @@ class UdfReader private constructor(
 
                 val extLbn: Long
                 val extPartRef: Int
+                var extRecordedLen = -1L
+                var extInfoLen = -1L
                 when (adType) {
                     0 -> {
                         extLbn = ByteUtils.readU32LE(buf, pos + 4)
@@ -413,6 +427,8 @@ class UdfReader private constructor(
                     }
                     else -> {
                         // ext_ad: extentLen(4), recordedLen(4), infoLen(4), loc.lbn(4), loc.partRef(2)
+                        extRecordedLen = ByteUtils.readU32LE(buf, pos + 4) and 0x3FFFFFFFL
+                        extInfoLen = ByteUtils.readU32LE(buf, pos + 8) and 0x3FFFFFFFL
                         extLbn = ByteUtils.readU32LE(buf, pos + 12)
                         extPartRef = ByteUtils.readU16LE(buf, pos + 16)
                     }
@@ -420,9 +436,21 @@ class UdfReader private constructor(
 
                 when (extType) {
                     0 -> {
-                        val partStart = partRefToStart[extPartRef] ?: partRefToStart.values.first()
-                        val diskOffset = (partStart + extLbn) * blockSize.toLong()
-                        out.add(UdfExtent(fileOffsetBytes = diskOffset, lengthBytes = byteLen))
+                        val partStartBytes = partRefToStartBytes[extPartRef] ?: partRefToStartBytes.values.first()
+                        val diskOffset = partStartBytes + extLbn * blockSize.toLong()
+                        if (adType == 2 && (extRecordedLen >= 0L || extInfoLen >= 0L)) {
+                            val targetLen = if (extInfoLen > 0L) minOf(byteLen, extInfoLen) else byteLen
+                            val dataLen = minOf(targetLen, extRecordedLen)
+                            if (dataLen > 0L) {
+                                out.add(UdfExtent(fileOffsetBytes = diskOffset, lengthBytes = dataLen))
+                            }
+                            val zeroTail = targetLen - dataLen
+                            if (zeroTail > 0L) {
+                                out.add(UdfExtent(fileOffsetBytes = -1L, lengthBytes = zeroTail))
+                            }
+                        } else {
+                            out.add(UdfExtent(fileOffsetBytes = diskOffset, lengthBytes = byteLen))
+                        }
                     }
                     1, 2 -> {
                         // Allocated-not-recorded or unallocated (sparse zero fill)
@@ -430,28 +458,30 @@ class UdfReader private constructor(
                     }
                     3 -> {
                         // Continuation Allocation Extent Descriptor (AED Tag 258)
-                        val partStart = partRefToStart[extPartRef] ?: partRefToStart.values.first()
+                        val partStartBytes = partRefToStartBytes[extPartRef] ?: partRefToStartBytes.values.first()
                         val aedSize = minOf(byteLen, 64L * 1024L).toInt().coerceAtLeast(blockSize)
                         val aedBuf = ByteArray(aedSize)
-                        source.readExact((partStart + extLbn) * blockSize.toLong(), aedBuf, 0, aedSize)
+                        source.readExact(partStartBytes + extLbn * blockSize.toLong(), aedBuf, 0, aedSize)
                         val aedTag = ByteUtils.readU16LE(aedBuf, 0)
-                        if (aedTag == TAG_ALLOC_EXTENT_DESC) {
-                            val contLen = ByteUtils.readU32LE(aedBuf, 20).toInt()
-                            if (24 + contLen <= aedBuf.size) {
-                                parseAllocationDescriptors(
-                                    source = source,
-                                    blockSize = blockSize,
-                                    partRefToStart = partRefToStart,
-                                    defaultPartRef = extPartRef,
-                                    adType = adType,
-                                    buf = aedBuf,
-                                    startOffset = 24,
-                                    length = contLen,
-                                    out = out,
-                                    depth = depth + 1
-                                )
-                            }
+                        if (aedTag != TAG_ALLOC_EXTENT_DESC) {
+                            throw IOException("Expected UDF Allocation Extent Descriptor (258), got tag=$aedTag")
                         }
+                        val contLenLong = ByteUtils.readU32LE(aedBuf, 20)
+                        if (contLenLong < 0L || contLenLong > (aedBuf.size - 24).toLong()) {
+                            throw IOException("UDF AED continuation length out of bounds: $contLenLong > ${aedBuf.size - 24}")
+                        }
+                        parseAllocationDescriptors(
+                            source = source,
+                            blockSize = blockSize,
+                            partRefToStartBytes = partRefToStartBytes,
+                            defaultPartRef = extPartRef,
+                            adType = adType,
+                            buf = aedBuf,
+                            startOffset = 24,
+                            length = contLenLong.toInt(),
+                            out = out,
+                            depth = depth + 1
+                        )
                         return
                     }
                 }
@@ -460,7 +490,23 @@ class UdfReader private constructor(
         }
 
         private fun readAllExtentsToByteArray(source: ImageSource, handle: UdfFileHandle): ByteArray {
-            val total = handle.sizeBytes.coerceAtMost(32L * 1024L * 1024L).toInt()
+            if (handle.sizeBytes < 0L || handle.sizeBytes > MAX_DIRECTORY_BYTES) {
+                throw IOException("UDF directory stream size out of bounds: ${handle.sizeBytes} bytes")
+            }
+            val total = handle.sizeBytes.toInt()
+            // Validate extent offsets fit within source before allocating large buffers
+            var checked = 0
+            for (ext in handle.extents) {
+                if (checked >= total) break
+                val copyLen = minOf(ext.lengthBytes, (total - checked).toLong())
+                if (ext.inlineBytes == null && ext.fileOffsetBytes >= 0L) {
+                    if (ext.fileOffsetBytes > source.sizeBytes || copyLen > source.sizeBytes - ext.fileOffsetBytes) {
+                        throw IOException("UDF directory extent out of image bounds: off=${ext.fileOffsetBytes}, len=$copyLen")
+                    }
+                }
+                checked += copyLen.toInt()
+            }
+
             val out = ByteArray(total)
             var outPos = 0
             for (ext in handle.extents) {
@@ -477,6 +523,14 @@ class UdfReader private constructor(
                 outPos += copyLen
             }
             return out
+        }
+
+        private fun isSafeEntryName(name: String): Boolean {
+            return name != "." &&
+                name != ".." &&
+                '/' !in name &&
+                '\\' !in name &&
+                '\u0000' !in name
         }
 
         private fun decodeDString(buf: ByteArray, offset: Int, fieldLen: Int): String {

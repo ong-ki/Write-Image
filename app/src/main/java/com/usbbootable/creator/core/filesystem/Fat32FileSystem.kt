@@ -57,6 +57,7 @@ class Fat32FileSystem(
         val name: String,
         val parent: DirNode?,
         var firstCluster: Long = 0L,
+        var allocatedClusters: Int = 1,
         val childrenDirs: MutableMap<String, DirNode> = LinkedHashMap(),
         val childrenFiles: MutableList<FileNode> = mutableListOf()
     )
@@ -80,6 +81,9 @@ class Fat32FileSystem(
         require(blockSize >= 512 && (blockSize and (blockSize - 1)) == 0) {
             "Invalid block size: $blockSize"
         }
+        if (totalSectors <= 0L || totalSectors > 0xFFFFFFFFL) {
+            throw IOException("Partition sector count ($totalSectors) outside FAT32 32-bit limit.")
+        }
         val partitionBytes = totalSectors * blockSize.toLong()
         var spc = chooseSectorsPerCluster(partitionBytes, blockSize)
         var computedFatSec: Long
@@ -87,19 +91,19 @@ class Fat32FileSystem(
 
         while (true) {
             val entriesPerFatSector = (blockSize / 4).toLong()
-            var fatSec = 1L
-            var dataClusters = 0L
-            for (iter in 0 until 8) {
+            val num = totalSectors - reservedSectors.toLong() + 2L * spc.toLong()
+            val den = entriesPerFatSector * spc.toLong() + numFats.toLong()
+            var fatSec = ((num + den - 1L) / den).coerceAtLeast(1L)
+            var dataClusters: Long
+            while (true) {
                 val dataSec = totalSectors - reservedSectors.toLong() - numFats.toLong() * fatSec
                 if (dataSec <= 0L) {
                     dataClusters = 0L
                     break
                 }
                 dataClusters = dataSec / spc.toLong()
-                val neededEntries = dataClusters + 2L
-                val nextFatSec = (neededEntries + entriesPerFatSector - 1L) / entriesPerFatSector
-                if (nextFatSec == fatSec) break
-                fatSec = nextFatSec
+                if (dataClusters + 2L <= fatSec * entriesPerFatSector) break
+                fatSec++
             }
             if (dataClusters >= MIN_FAT32_CLUSTERS || spc == 1) {
                 computedFatSec = fatSec
@@ -112,6 +116,11 @@ class Fat32FileSystem(
         if (computedDataClusters < MIN_FAT32_CLUSTERS) {
             throw IOException(
                 "Partition too small for valid FAT32 ($computedDataClusters clusters; minimum $MIN_FAT32_CLUSTERS)."
+            )
+        }
+        if (computedDataClusters > MAX_FAT32_CLUSTERS) {
+            throw IOException(
+                "Partition cluster count ($computedDataClusters) exceeds FAT32 28-bit limit ($MAX_FAT32_CLUSTERS)."
             )
         }
 
@@ -130,10 +139,17 @@ class Fat32FileSystem(
     fun getWrittenFiles(): List<WrittenFileAllocation> = writtenFiles.toList()
 
     fun ensureDirectory(normalizedPath: String) {
-        val parts = normalizedPath.split('/').filter { it.isNotEmpty() }
+        val parts = FileSystemIoHelpers.splitAndValidatePath(normalizedPath)
         var cur = rootDir
         for (part in parts) {
             val key = part.lowercase(Locale.ROOT)
+            FileSystemIoHelpers.ensureNoCaseCollision(
+                parentPathHint = normalizedPath,
+                newName = part,
+                existingDirKeys = emptySet(),
+                existingFileNames = cur.childrenFiles.map { it.name },
+                expectDirectory = true
+            )
             cur = cur.childrenDirs.getOrPut(key) { DirNode(name = part, parent = cur) }
         }
     }
@@ -153,21 +169,33 @@ class Fat32FileSystem(
             throw IOException("File '$normalizedPath' size ($sizeBytes B) exceeds FAT32 4 GiB limit.")
         }
 
-        val parts = normalizedPath.split('/').filter { it.isNotEmpty() }
-        require(parts.isNotEmpty()) { "Empty file path" }
+        val parts = FileSystemIoHelpers.splitAndValidatePath(normalizedPath)
         var parent = rootDir
         for (i in 0 until parts.size - 1) {
             val part = parts[i]
             val key = part.lowercase(Locale.ROOT)
+            FileSystemIoHelpers.ensureNoCaseCollision(
+                parentPathHint = normalizedPath,
+                newName = part,
+                existingDirKeys = emptySet(),
+                existingFileNames = parent.childrenFiles.map { it.name },
+                expectDirectory = true
+            )
             parent = parent.childrenDirs.getOrPut(key) { DirNode(name = part, parent = parent) }
         }
         val fileName = parts.last()
+        FileSystemIoHelpers.ensureNoCaseCollision(
+            parentPathHint = normalizedPath,
+            newName = fileName,
+            existingDirKeys = parent.childrenDirs.keys,
+            existingFileNames = parent.childrenFiles.map { it.name },
+            expectDirectory = false
+        )
 
         sha256Digest.reset()
         val neededClusters = if (sizeBytes == 0L) 0L else (sizeBytes + clusterSizeBytes - 1L) / clusterSizeBytes
 
         if (neededClusters == 0L) {
-            // Empty file uses firstCluster = 0 per FAT32 spec
             streamer { _, _ -> }
             parent.childrenFiles.add(FileNode(name = fileName, sizeBytes = 0L, firstCluster = 0L))
             val rec = WrittenFileAllocation(
@@ -182,55 +210,21 @@ class Fat32FileSystem(
         }
 
         val firstCluster = allocateContiguousClusters(neededClusters)
-        var currentLba = clusterToLba(firstCluster)
-
-        val writeBuf = reusableIoBuffer
-        var bufFill = 0
-        var totalWritten = 0L
-
-        streamer { data, len ->
-            if (isCancelled()) throw CancellationException("FAT32 write cancelled.")
-            if (len <= 0) return@streamer
-            sha256Digest.update(data, 0, len)
-            var srcPos = 0
-            var rem = len
-            while (rem > 0) {
-                val space = batchBytes - bufFill
-                val toCopy = minOf(rem, space)
-                System.arraycopy(data, srcPos, writeBuf, bufFill, toCopy)
-                bufFill += toCopy
-                srcPos += toCopy
-                rem -= toCopy
-
-                if (bufFill == batchBytes) {
-                    if (isCancelled()) throw CancellationException("FAT32 write cancelled.")
-                    val sectorCount = batchBytes / blockSize
-                    device.writeBlocks(currentLba, sectorCount, writeBuf, 0)
-                    currentLba += sectorCount
-                    totalWritten += batchBytes
-                    onBytesWritten(batchBytes.toLong())
-                    bufFill = 0
-                }
-            }
-        }
-
-        if (bufFill > 0) {
-            if (isCancelled()) throw CancellationException("FAT32 write cancelled.")
-            // Pad remainder of final cluster with zeros
-            val paddedClusters = (bufFill + clusterSizeBytes - 1) / clusterSizeBytes
-            val paddedBytes = paddedClusters * clusterSizeBytes
-            writeBuf.fill(0, bufFill, paddedBytes)
-            val sectorCount = paddedBytes / blockSize
-            device.writeBlocks(currentLba, sectorCount, writeBuf, 0)
-            totalWritten += bufFill
-            onBytesWritten(bufFill.toLong())
-        }
-
-        if (totalWritten != sizeBytes) {
-            throw IOException(
-                "FAT32 stream size mismatch for '$normalizedPath': expected=$sizeBytes, got=$totalWritten"
-            )
-        }
+        val shaHex = FileSystemIoHelpers.streamToContiguousClusters(
+            device = device,
+            normalizedPath = normalizedPath,
+            fsLabel = "FAT32",
+            startLba = clusterToLba(firstCluster),
+            expectedSizeBytes = sizeBytes,
+            blockSize = blockSize,
+            clusterSizeBytes = clusterSizeBytes,
+            batchBytes = batchBytes,
+            writeBuf = reusableIoBuffer,
+            digest = sha256Digest,
+            isCancelled = isCancelled,
+            streamer = streamer,
+            onBytesWritten = onBytesWritten
+        )
 
         parent.childrenFiles.add(FileNode(name = fileName, sizeBytes = sizeBytes, firstCluster = firstCluster))
         val rec = WrittenFileAllocation(
@@ -238,7 +232,7 @@ class Fat32FileSystem(
             sizeBytes = sizeBytes,
             firstCluster = firstCluster,
             clusterCount = neededClusters,
-            sha256Hex = ByteUtils.toHex(sha256Digest.digest())
+            sha256Hex = shaHex
         )
         writtenFiles.add(rec)
         return rec
@@ -260,13 +254,12 @@ class Fat32FileSystem(
             queue.addAll(dir.childrenDirs.values)
         }
 
-        // First pass: calculate exact byte size & allocate clusters for each directory
-        val dirEntrySizes = HashMap<DirNode, Int>()
+        // First pass: calculate byte size & allocate clusters for each directory
         val dirExtraClusters = HashMap<DirNode, Pair<Long, Long>>() // For root dir if > 1 cluster
         for (dir in allDirs) {
             val serializedSize = estimateDirectoryBytes(dir)
-            dirEntrySizes[dir] = serializedSize
             val clusterCount = ((serializedSize + clusterSizeBytes - 1) / clusterSizeBytes).coerceAtLeast(1)
+            dir.allocatedClusters = clusterCount
             if (dir === rootDir) {
                 dir.firstCluster = 2L
                 if (clusterCount > 1) {
@@ -282,11 +275,13 @@ class Fat32FileSystem(
             }
         }
 
-        // Second pass: now that every DirNode has its final firstCluster, write directory clusters!
+        // Second pass: write ALL allocated directory clusters (zero-padding trailing space)
         for (dir in allDirs) {
             val rawBytes = serializeDirectory(dir)
-            val totalDirClusters = ((rawBytes.size + clusterSizeBytes - 1) / clusterSizeBytes).coerceAtLeast(1)
-            val padded = ByteArray(totalDirClusters * clusterSizeBytes)
+            val padded = ByteArray(dir.allocatedClusters * clusterSizeBytes)
+            if (rawBytes.size > padded.size) {
+                throw IOException("FAT32 directory '${dir.name}' serialized size (${rawBytes.size}) exceeded allocated size (${padded.size})")
+            }
             System.arraycopy(rawBytes, 0, padded, 0, rawBytes.size)
 
             if (dir === rootDir) {
@@ -305,7 +300,7 @@ class Fat32FileSystem(
             } else {
                 device.writeBlocks(
                     clusterToLba(dir.firstCluster),
-                    totalDirClusters * sectorsPerCluster,
+                    dir.allocatedClusters * sectorsPerCluster,
                     padded,
                     0
                 )
@@ -337,33 +332,22 @@ class Fat32FileSystem(
         record: WrittenFileAllocation,
         onBytesVerified: (Long) -> Unit = {}
     ): Boolean {
-        sha256Digest.reset()
-        if (record.sizeBytes == 0L) {
-            return ByteUtils.toHex(sha256Digest.digest()) == record.sha256Hex
-        }
-
-        val readBuf = reusableIoBuffer
-        var currentLba = clusterToLba(record.firstCluster)
-        var remainingBytes = record.sizeBytes
-        var remainingClusters = record.clusterCount
-
-        while (remainingClusters > 0L) {
-            if (isCancelled()) throw CancellationException("FAT32 verification cancelled.")
-            val clustersToRead = minOf(remainingClusters, batchClusters.toLong()).toInt()
-            val sectorsToRead = clustersToRead * sectorsPerCluster
-            device.readBlocks(currentLba, sectorsToRead, readBuf, 0)
-
-            val validBytes = minOf(remainingBytes, (clustersToRead * clusterSizeBytes).toLong()).toInt()
-            sha256Digest.update(readBuf, 0, validBytes)
-            onBytesVerified(validBytes.toLong())
-
-            currentLba += sectorsToRead
-            remainingClusters -= clustersToRead
-            remainingBytes -= validBytes
-        }
-
-        val actualHash = ByteUtils.toHex(sha256Digest.digest())
-        return actualHash == record.sha256Hex
+        return FileSystemIoHelpers.verifyFromContiguousClusters(
+            device = device,
+            fsLabel = "FAT32",
+            startLba = if (record.sizeBytes > 0L) clusterToLba(record.firstCluster) else 0L,
+            sizeBytes = record.sizeBytes,
+            clusterCount = record.clusterCount,
+            blockSize = blockSize,
+            clusterSizeBytes = clusterSizeBytes,
+            sectorsPerCluster = sectorsPerCluster,
+            batchClusters = batchClusters,
+            readBuf = reusableIoBuffer,
+            digest = sha256Digest,
+            expectedSha256Hex = record.sha256Hex,
+            isCancelled = isCancelled,
+            onBytesVerified = onBytesVerified
+        )
     }
 
     private fun allocateContiguousClusters(count: Long): Long {
@@ -559,6 +543,7 @@ class Fat32FileSystem(
     companion object {
         const val MAX_FAT32_FILE_SIZE: Long = 4_294_967_295L
         private const val MIN_FAT32_CLUSTERS = 65_525L
+        private const val MAX_FAT32_CLUSTERS = 0x0FFFFFF6L
         private const val FAT32_EOC = 0x0FFFFFFFL
         private const val ATTR_VOLUME_ID = 0x08
         private const val ATTR_LFN = 0x0F

@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.usbbootable.creator.GptAndMbrPartitionerTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-11-21T10:58:17.761Z" hostname="zin-x450cc" time="0.614">
-  <properties/>
-  <testcase name="mbrPartitionerWritesValidActiveFat32AndWipesStaleBackupGpt" classname="com.usbbootable.creator.GptAndMbrPartitionerTest" time="0.076"/>
-  <testcase name="gptPartitionerWritesValidProtectiveMbrPrimaryAndBackupHeadersWithCrc32" classname="com.usbbootable.creator.GptAndMbrPartitionerTest" time="0.536"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>

@@ -1,13 +1,17 @@
 package com.usbbootable.creator.core.storage
 
 import android.content.Context
+import androidx.core.content.edit
+import com.usbbootable.creator.core.writer.WindowsBypassOptions
 import com.usbbootable.creator.core.writer.WritePhase
 import com.usbbootable.creator.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicLong
 
 enum class WriteBufferOption(val label: String, val bytesOrAuto: Int) {
     AUTO("Auto (Adaptive)", 0),
@@ -25,7 +29,8 @@ enum class WriteBufferOption(val label: String, val bytesOrAuto: Int) {
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val bufferOption: WriteBufferOption = WriteBufferOption.AUTO,
-    val verifyAfterWrite: Boolean = true
+    val verifyAfterWrite: Boolean = true,
+    val windowsBypassOptions: WindowsBypassOptions = WindowsBypassOptions.NONE
 )
 
 data class OperationHistoryRecord(
@@ -49,40 +54,76 @@ data class OperationHistoryRecord(
 class AppPreferencesStore(context: Context) {
 
     private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val historyLock = Any()
 
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
-    private val _history = MutableStateFlow(loadHistory())
+    private val initialHistory = loadHistory()
+    private val lastHistoryId = AtomicLong(initialHistory.maxOfOrNull { it.id } ?: 0L)
+    private val _history = MutableStateFlow(initialHistory)
     val history: StateFlow<List<OperationHistoryRecord>> = _history.asStateFlow()
 
     fun setThemeMode(mode: ThemeMode) {
-        val updated = _settings.value.copy(themeMode = mode)
-        _settings.value = updated
-        prefs.edit().putString(KEY_THEME_MODE, mode.name).apply()
+        _settings.update { it.copy(themeMode = mode) }
+        prefs.edit { putString(KEY_THEME_MODE, mode.name) }
     }
 
     fun setBufferOption(option: WriteBufferOption) {
-        val updated = _settings.value.copy(bufferOption = option)
-        _settings.value = updated
-        prefs.edit().putString(KEY_BUFFER_OPTION, option.name).apply()
+        _settings.update { it.copy(bufferOption = option) }
+        prefs.edit { putString(KEY_BUFFER_OPTION, option.name) }
     }
 
     fun setVerifyAfterWrite(enabled: Boolean) {
-        val updated = _settings.value.copy(verifyAfterWrite = enabled)
-        _settings.value = updated
-        prefs.edit().putBoolean(KEY_VERIFY_AFTER_WRITE, enabled).apply()
+        _settings.update { it.copy(verifyAfterWrite = enabled) }
+        prefs.edit { putBoolean(KEY_VERIFY_AFTER_WRITE, enabled) }
+    }
+
+    fun setWindowsBypassOptions(options: WindowsBypassOptions) {
+        _settings.update { it.copy(windowsBypassOptions = options) }
+        prefs.edit {
+            putBoolean(KEY_BYPASS_TPM, options.bypassTpm)
+            putBoolean(KEY_BYPASS_SECURE_BOOT, options.bypassSecureBoot)
+            putBoolean(KEY_BYPASS_RAM, options.bypassRam)
+            putBoolean(KEY_BYPASS_CPU, options.bypassCpu)
+        }
     }
 
     fun recordOperation(entry: OperationHistoryRecord) {
-        val updated = (listOf(entry) + _history.value).take(MAX_HISTORY_ITEMS)
-        _history.value = updated
-        saveHistory(updated)
+        synchronized(historyLock) {
+            val uniqueId = lastHistoryId.updateAndGet { prev ->
+                if (entry.id > prev) entry.id else prev + 1L
+            }
+            val normalized = if (entry.id == uniqueId) entry else entry.copy(id = uniqueId)
+            val updated = (listOf(normalized) + _history.value).take(MAX_HISTORY_ITEMS)
+            _history.value = updated
+            saveHistory(updated)
+        }
     }
 
     fun clearHistory() {
-        _history.value = emptyList()
-        prefs.edit().remove(KEY_HISTORY_JSON).apply()
+        synchronized(historyLock) {
+            _history.value = emptyList()
+            prefs.edit { remove(KEY_HISTORY_JSON) }
+        }
+    }
+
+    /**
+     * Restores only user-customizable application settings. Deliberately leaves the operation
+     * history key untouched, and never touches ISO files, USB state, or any device configuration.
+     */
+    fun resetDefaults() {
+        val defaults = AppSettings()
+        _settings.value = defaults
+        prefs.edit {
+            putString(KEY_THEME_MODE, defaults.themeMode.name)
+            putString(KEY_BUFFER_OPTION, defaults.bufferOption.name)
+            putBoolean(KEY_VERIFY_AFTER_WRITE, defaults.verifyAfterWrite)
+            putBoolean(KEY_BYPASS_TPM, defaults.windowsBypassOptions.bypassTpm)
+            putBoolean(KEY_BYPASS_SECURE_BOOT, defaults.windowsBypassOptions.bypassSecureBoot)
+            putBoolean(KEY_BYPASS_RAM, defaults.windowsBypassOptions.bypassRam)
+            putBoolean(KEY_BYPASS_CPU, defaults.windowsBypassOptions.bypassCpu)
+        }
     }
 
     private fun loadSettings(): AppSettings {
@@ -91,10 +132,17 @@ class AppPreferencesStore(context: Context) {
         } ?: ThemeMode.SYSTEM
         val buffer = WriteBufferOption.fromName(prefs.getString(KEY_BUFFER_OPTION, WriteBufferOption.AUTO.name))
         val verify = prefs.getBoolean(KEY_VERIFY_AFTER_WRITE, true)
+        val bypass = WindowsBypassOptions(
+            bypassTpm = prefs.getBoolean(KEY_BYPASS_TPM, false),
+            bypassSecureBoot = prefs.getBoolean(KEY_BYPASS_SECURE_BOOT, false),
+            bypassRam = prefs.getBoolean(KEY_BYPASS_RAM, false),
+            bypassCpu = prefs.getBoolean(KEY_BYPASS_CPU, false)
+        )
         return AppSettings(
             themeMode = theme,
             bufferOption = buffer,
-            verifyAfterWrite = verify
+            verifyAfterWrite = verify,
+            windowsBypassOptions = bypass
         )
     }
 
@@ -150,7 +198,7 @@ class AppPreferencesStore(context: Context) {
                 }
             )
         }
-        prefs.edit().putString(KEY_HISTORY_JSON, arr.toString()).apply()
+        prefs.edit { putString(KEY_HISTORY_JSON, arr.toString()) }
     }
 
     companion object {
@@ -158,6 +206,10 @@ class AppPreferencesStore(context: Context) {
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_BUFFER_OPTION = "buffer_option"
         private const val KEY_VERIFY_AFTER_WRITE = "verify_after_write"
+        private const val KEY_BYPASS_TPM = "win_bypass_tpm"
+        private const val KEY_BYPASS_SECURE_BOOT = "win_bypass_secure_boot"
+        private const val KEY_BYPASS_RAM = "win_bypass_ram"
+        private const val KEY_BYPASS_CPU = "win_bypass_cpu"
         private const val KEY_HISTORY_JSON = "operation_history_json"
         private const val MAX_HISTORY_ITEMS = 50
     }

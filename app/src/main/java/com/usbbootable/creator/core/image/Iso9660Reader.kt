@@ -24,6 +24,7 @@ class Iso9660Reader private constructor(
         consumer: (data: ByteArray, length: Int) -> Unit
     ) {
         require(!entry.isDirectory) { "Cannot stream directory entry: ${entry.path}" }
+        require(buffer.isNotEmpty()) { "Stream buffer must not be empty" }
         val handle = entry.opaqueHandle as? IsoFileHandle
             ?: throw IOException("Invalid ISO-9660 handle for ${entry.path}")
 
@@ -42,6 +43,8 @@ class Iso9660Reader private constructor(
 
     companion object {
         private const val SECTOR_SIZE = 2048
+        private const val MAX_DIRECTORY_BYTES = 16L * 1024L * 1024L
+        private const val MAX_ENTRIES = 100_000
 
         fun tryParse(source: ImageSource): Iso9660Reader? {
             return try {
@@ -97,18 +100,29 @@ class Iso9660Reader private constructor(
             val rootLen = ByteUtils.readU32LE(activeVd, 156 + 10)
 
             val entries = mutableListOf<ImageEntry>()
-            val visitedDirs = HashSet<Long>()
-            val queue = ArrayDeque<Triple<String, Long, Long>>()
-            queue.add(Triple("", rootLba, rootLen))
+            // Track active ancestor LBAs per branch so cycles are rejected while deduplicated sibling dirs still traverse
+            data class DirQueueItem(
+                val parentPath: String,
+                val dirLba: Long,
+                val dirLen: Long,
+                val ancestors: Set<Long>
+            )
+            val queue = ArrayDeque<DirQueueItem>()
+            queue.add(DirQueueItem("", rootLba, rootLen, setOf(rootLba)))
 
             while (queue.isNotEmpty()) {
-                val (parentPath, dirLba, dirLen) = queue.removeFirst()
-                if (!visitedDirs.add(dirLba)) continue
-                val safeLen = dirLen.coerceAtMost(16L * 1024L * 1024L).toInt()
-                if (safeLen <= 0) continue
+                val (parentPath, dirLba, dirLen, ancestors) = queue.removeFirst()
+                val dirOffset = dirLba * blockSize.toLong()
+                if (dirLba < 0L || dirOffset < 0L || dirOffset >= source.sizeBytes) continue
+                val available = source.sizeBytes - dirOffset
+                if (dirLen <= 0L) continue
+                if (dirLen > MAX_DIRECTORY_BYTES || dirLen > available) {
+                    throw IOException("ISO-9660 directory bounds invalid at LBA $dirLba (len=$dirLen, available=$available)")
+                }
+                val safeLen = dirLen.toInt()
 
                 val dirData = ByteArray(safeLen)
-                source.readExact(dirLba * blockSize.toLong(), dirData, 0, safeLen)
+                source.readExact(dirOffset, dirData, 0, safeLen)
 
                 var pos = 0
                 val pendingMultiExtents = LinkedHashMap<String, MutableList<IsoExtent>>()
@@ -138,28 +152,36 @@ class Iso9660Reader private constructor(
                             } else {
                                 String(dirData, pos + 33, idLen, Charsets.ISO_8859_1)
                             }
-                            val cleanName = cleanIsoName(rawName)
-                            if (cleanName.isNotEmpty()) {
+                            val cleanName = cleanIsoName(rawName, isJoliet)
+                            if (cleanName.isNotEmpty() && isSafeEntryName(cleanName)) {
                                 val fullPath = if (parentPath.isEmpty()) cleanName else "$parentPath/$cleanName"
                                 val isDir = (flags and 0x02) != 0
                                 val isMultiExtent = (flags and 0x80) != 0
 
                                 if (isDir) {
-                                    entries.add(
-                                        ImageEntry(
-                                            path = fullPath,
-                                            name = cleanName,
-                                            isDirectory = true,
-                                            sizeBytes = 0L,
-                                            opaqueHandle = Unit
+                                    if (extLba !in ancestors) {
+                                        if (entries.size >= MAX_ENTRIES) {
+                                            throw IOException("ISO-9660 entry limit exceeded ($MAX_ENTRIES entries).")
+                                        }
+                                        entries.add(
+                                            ImageEntry(
+                                                path = fullPath,
+                                                name = cleanName,
+                                                isDirectory = true,
+                                                sizeBytes = 0L,
+                                                opaqueHandle = Unit
+                                            )
                                         )
-                                    )
-                                    queue.add(Triple(fullPath, extLba, dataLen))
+                                        queue.add(DirQueueItem(fullPath, extLba, dataLen, ancestors + extLba))
+                                    }
                                 } else if (isMultiExtent || pendingMultiExtents.containsKey(fullPath)) {
                                     val list = pendingMultiExtents.getOrPut(fullPath) { mutableListOf() }
                                     list.add(IsoExtent(extLba, dataLen))
                                     pendingNames[fullPath] = cleanName
                                     if (!isMultiExtent) {
+                                        if (entries.size >= MAX_ENTRIES) {
+                                            throw IOException("ISO-9660 entry limit exceeded ($MAX_ENTRIES entries).")
+                                        }
                                         val totalSize = list.sumOf { it.lengthBytes }
                                         entries.add(
                                             ImageEntry(
@@ -174,6 +196,9 @@ class Iso9660Reader private constructor(
                                         pendingNames.remove(fullPath)
                                     }
                                 } else {
+                                    if (entries.size >= MAX_ENTRIES) {
+                                        throw IOException("ISO-9660 entry limit exceeded ($MAX_ENTRIES entries).")
+                                    }
                                     entries.add(
                                         ImageEntry(
                                             path = fullPath,
@@ -193,6 +218,9 @@ class Iso9660Reader private constructor(
 
                 // Flush any remaining multi-extent entries
                 for ((fullPath, extents) in pendingMultiExtents) {
+                    if (entries.size >= MAX_ENTRIES) {
+                        throw IOException("ISO-9660 entry limit exceeded ($MAX_ENTRIES entries).")
+                    }
                     entries.add(
                         ImageEntry(
                             path = fullPath,
@@ -214,12 +242,21 @@ class Iso9660Reader private constructor(
             )
         }
 
-        private fun cleanIsoName(raw: String): String {
-            var name = raw.substringBefore(';')
-            if (name.endsWith('.') && name.count { it == '.' } == 1) {
-                name = name.dropLast(1)
+        private fun cleanIsoName(raw: String, isJoliet: Boolean): String {
+            val hadVersion = ';' in raw
+            var name = raw.substringBefore(';').trim()
+            if ((hadVersion || !isJoliet) && name.endsWith('.')) {
+                name = name.dropLast(1).trimEnd()
             }
-            return name.trim()
+            return name
+        }
+
+        private fun isSafeEntryName(name: String): Boolean {
+            return name != "." &&
+                name != ".." &&
+                '/' !in name &&
+                '\\' !in name &&
+                '\u0000' !in name
         }
 
         private fun decodeUtf16Be(buf: ByteArray, offset: Int, length: Int): String {

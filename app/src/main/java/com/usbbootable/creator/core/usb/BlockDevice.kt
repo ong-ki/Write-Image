@@ -41,8 +41,8 @@ class PartitionBlockDevice(
     init {
         require(startLba >= 0L) { "Partition startLba must be non-negative: $startLba" }
         require(totalBlocks > 0L) { "Partition totalBlocks must be positive: $totalBlocks" }
-        require(startLba + totalBlocks <= parent.totalBlocks) {
-            "Partition [$startLba, ${startLba + totalBlocks}) exceeds parent blocks ${parent.totalBlocks}"
+        require(startLba <= parent.totalBlocks && totalBlocks <= parent.totalBlocks - startLba) {
+            "Partition [start=$startLba, blocks=$totalBlocks) exceeds parent blocks ${parent.totalBlocks}"
         }
     }
 
@@ -72,7 +72,7 @@ class PartitionBlockDevice(
 
     private fun checkBounds(lba: Long, count: Int) {
         if (count < 0) throw IllegalArgumentException("Negative blockCount: $count")
-        if (lba < 0L || lba + count > totalBlocks) {
+        if (lba < 0L || lba > totalBlocks || count.toLong() > totalBlocks - lba) {
             throw IOException(
                 "Partition I/O out of bounds: lba=$lba, count=$count, partitionBlocks=$totalBlocks"
             )

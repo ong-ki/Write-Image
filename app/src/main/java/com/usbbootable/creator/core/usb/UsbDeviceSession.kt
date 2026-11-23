@@ -9,6 +9,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import com.usbbootable.creator.core.util.OperationLogger
 import java.io.Closeable
+import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class BotInterfaceMatch(
@@ -26,7 +27,6 @@ class UsbDeviceSession private constructor(
     private val connection: UsbDeviceConnection,
     private val usbInterface: UsbInterface,
     val blockDevice: ScsiBlockDevice,
-    val maxLun: Int,
     val recommendedBufferBytes: Int,
     private val logger: OperationLogger?
 ) : Closeable {
@@ -47,14 +47,18 @@ class UsbDeviceSession private constructor(
             connection.close()
         } catch (_: Exception) {
         }
+        synchronized(sessionOpenLock) {
+            activeDeviceIds.remove(device.deviceId)
+        }
         logger?.info(TAG, "Released USB interface and closed session for ${device.deviceName}")
     }
 
     companion object {
         private const val TAG = "UsbSession"
-        // Process-wide session lock prevents background capacity probes from overlapping
-        // with an active write session on the same USB Host controller.
+        // Process-wide session lock and active set prevent concurrent access (e.g. background probe
+        // or health check colliding with an active flash write) on the same USB device.
         private val sessionOpenLock = Any()
+        private val activeDeviceIds = mutableSetOf<Int>()
         const val SUBCLASS_SFF_8070I = 0x05
         const val SUBCLASS_SCSI_TRANSPARENT = 0x06
         const val PROTOCOL_BOT = 0x50
@@ -114,6 +118,9 @@ class UsbDeviceSession private constructor(
             if (!usbManager.hasPermission(device)) {
                 throw UsbStorageException("USB permission has not been granted for this drive.")
             }
+            if (device.deviceId in activeDeviceIds) {
+                throw UsbStorageException("USB drive is currently busy with another operation.")
+            }
             val match = findBotInterface(device)
                 ?: throw UsbStorageException(
                     "USB device does not expose a compatible Bulk-Only Transport (BOT) SCSI interface."
@@ -125,6 +132,7 @@ class UsbDeviceSession private constructor(
                 )
 
             var claimed = false
+            activeDeviceIds.add(device.deviceId)
             try {
                 // force = true invokes USBDEVFS_DISCONNECT to detach the kernel usb-storage driver
                 claimed = connection.claimInterface(match.usbInterface, true)
@@ -135,8 +143,10 @@ class UsbDeviceSession private constructor(
                             "eject/unmount the USB drive (keep it plugged in), and retry."
                     )
                 }
-                if (match.usbInterface.alternateSetting > 0) {
-                    connection.setInterface(match.usbInterface)
+                if (match.usbInterface.alternateSetting > 0 && !connection.setInterface(match.usbInterface)) {
+                    throw UsbStorageException(
+                        "Failed to activate USB BOT alternate interface setting ${match.usbInterface.alternateSetting}."
+                    )
                 }
 
                 logger?.info(
@@ -186,6 +196,7 @@ class UsbDeviceSession private constructor(
                 var chosenBlockDevice: ScsiBlockDevice? = null
                 var lastErr: Exception? = null
                 for (lun in 0..maxLun) {
+                    if (isCancelled()) throw CancellationException("USB initialization cancelled.")
                     val candidate = ScsiBlockDevice(
                         transport = transport,
                         lun = lun,
@@ -197,6 +208,10 @@ class UsbDeviceSession private constructor(
                         candidate.initialize()
                         chosenBlockDevice = candidate
                         break
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: UsbDisconnectedException) {
+                        throw e
                     } catch (e: Exception) {
                         lastErr = e
                         logger?.warn(TAG, "LUN $lun probe skipped: ${e.message}")
@@ -212,11 +227,11 @@ class UsbDeviceSession private constructor(
                     connection = connection,
                     usbInterface = match.usbInterface,
                     blockDevice = readyDevice,
-                    maxLun = maxLun,
                     recommendedBufferBytes = effectiveBufferBytes,
                     logger = logger
                 )
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                activeDeviceIds.remove(device.deviceId)
                 if (claimed) {
                     try {
                         connection.releaseInterface(match.usbInterface)

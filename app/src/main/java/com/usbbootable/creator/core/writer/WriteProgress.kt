@@ -34,6 +34,7 @@ data class VerificationReport(
 data class WriteProgress(
     val phase: WritePhase = WritePhase.IDLE,
     val bytesProcessed: Long = 0L,
+    val bytesWritten: Long = 0L,
     val totalBytes: Long = 0L,
     val phaseProgress: Float = 0f,
     val overallProgress: Float = 0f,

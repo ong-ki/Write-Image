@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.usbbootable.creator.WindowsUefiWriterTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-11-21T10:58:21.126Z" hostname="zin-x450cc" time="0.124">
-  <properties/>
-  <testcase name="singleFat32WindowsUefiWriteAndVerifySucceeds" classname="com.usbbootable.creator.WindowsUefiWriterTest" time="0.038"/>
-  <testcase name="dualPartitionGptFat32ExFatWindowsUefiWriteAndVerifySucceeds" classname="com.usbbootable.creator.WindowsUefiWriterTest" time="0.085"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>

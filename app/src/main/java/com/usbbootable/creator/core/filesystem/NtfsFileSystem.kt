@@ -30,7 +30,8 @@ class NtfsFileSystem(
     private val hiddenSectors: Long,
     volumeLabel: String = "WIN_INSTALL",
     ioBufferBytes: Int = 256 * 1024,
-    private val isCancelled: () -> Boolean = { false }
+    private val isCancelled: () -> Boolean = { false },
+    expectedEntryCount: Int = 0
 ) {
     val blockSize: Int = device.blockSize
     val totalPartitionSectors: Long = device.totalBlocks
@@ -54,6 +55,7 @@ class NtfsFileSystem(
     private val maxMftRecordsReserved: Int
     private val reservedMftClusters: Long
     private val mftBitmapLcn: Long
+    private val mftBitmapClusters: Long
     private val attrDefLcn: Long
     private val volBitmapLcn: Long
     private val volBitmapLengthBytes: Long
@@ -108,13 +110,25 @@ class NtfsFileSystem(
             throw IOException("Partition too small to format as NTFS 3.1 ($totalClusters clusters).")
         }
 
-        // Reserve room for up to 4096 MFT records (1024 clusters = 4 MiB) on large drives,
-        // or 256 MFT records (64 clusters = 256 KiB) on small synthetic test volumes.
-        maxMftRecordsReserved = if (totalClusters >= 8192L) 4096 else 256
+        // Reserve room dynamically when expectedEntryCount is known, keeping baseline minimums
+        // (4096 records on large drives, 256 on small synthetic volumes).
+        val baseReserved = if (totalClusters >= 8192L) 4096L else 256L
+        val expectedMin = if (expectedEntryCount > 0) {
+            (((24L + expectedEntryCount.toLong() + 16L) + 3L) / 4L) * 4L
+        } else {
+            0L
+        }
+        val desiredRecords = maxOf(baseReserved, expectedMin)
+        if (desiredRecords > 262_144L || desiredRecords / MFT_RECORDS_PER_CLUSTER.toLong() >= totalClusters - 64L) {
+            throw IOException("NTFS reserved MFT record requirement ($desiredRecords) exceeds partition capacity.")
+        }
+        maxMftRecordsReserved = desiredRecords.toInt()
         reservedMftClusters = (maxMftRecordsReserved / MFT_RECORDS_PER_CLUSTER).toLong()
 
         mftBitmapLcn = mftStartLcn + reservedMftClusters
-        attrDefLcn = mftBitmapLcn + 1L
+        val maxMftBmpBytes = (((maxMftRecordsReserved + 7) / 8 + 7) / 8) * 8
+        mftBitmapClusters = ((maxMftBmpBytes.toLong() + clusterSizeBytes - 1L) / clusterSizeBytes).coerceAtLeast(1L)
+        attrDefLcn = mftBitmapLcn + mftBitmapClusters
         volBitmapLcn = attrDefLcn + 1L
 
         // NTFS $Bitmap size in bytes is rounded up to an 8-byte boundary
@@ -142,10 +156,17 @@ class NtfsFileSystem(
     fun getWrittenFiles(): List<WrittenFileAllocation> = writtenFiles.toList()
 
     fun ensureDirectory(normalizedPath: String) {
-        val parts = normalizedPath.split('/').filter { it.isNotEmpty() }
+        val parts = FileSystemIoHelpers.splitAndValidatePath(normalizedPath)
         var cur = rootDir
         for (part in parts) {
             val key = part.lowercase(Locale.ROOT)
+            FileSystemIoHelpers.ensureNoCaseCollision(
+                parentPathHint = normalizedPath,
+                newName = part,
+                existingDirKeys = emptySet(),
+                existingFileNames = cur.childrenFiles.map { it.name },
+                expectDirectory = true
+            )
             cur = cur.childrenDirs.getOrPut(key) { DirNode(name = part, parent = cur) }
         }
     }
@@ -162,16 +183,29 @@ class NtfsFileSystem(
         onBytesWritten: (Long) -> Unit = {}
     ): WrittenFileAllocation {
         require(sizeBytes >= 0L) { "Negative file size: $sizeBytes" }
-        val parts = normalizedPath.split('/').filter { it.isNotEmpty() }
-        require(parts.isNotEmpty()) { "Empty file path" }
+        val parts = FileSystemIoHelpers.splitAndValidatePath(normalizedPath)
 
         var parent = rootDir
         for (i in 0 until parts.size - 1) {
             val part = parts[i]
             val key = part.lowercase(Locale.ROOT)
+            FileSystemIoHelpers.ensureNoCaseCollision(
+                parentPathHint = normalizedPath,
+                newName = part,
+                existingDirKeys = emptySet(),
+                existingFileNames = parent.childrenFiles.map { it.name },
+                expectDirectory = true
+            )
             parent = parent.childrenDirs.getOrPut(key) { DirNode(name = part, parent = parent) }
         }
         val fileName = parts.last()
+        FileSystemIoHelpers.ensureNoCaseCollision(
+            parentPathHint = normalizedPath,
+            newName = fileName,
+            existingDirKeys = parent.childrenDirs.keys,
+            existingFileNames = parent.childrenFiles.map { it.name },
+            expectDirectory = false
+        )
 
         sha256Digest.reset()
         val neededClusters = if (sizeBytes == 0L) 0L else (sizeBytes + clusterSizeBytes - 1L) / clusterSizeBytes
@@ -198,54 +232,21 @@ class NtfsFileSystem(
         }
 
         val startLcn = allocateContiguousClusters(neededClusters)
-        var currentLba = clusterToLba(startLcn)
-
-        val writeBuf = reusableIoBuffer
-        var bufFill = 0
-        var totalWritten = 0L
-
-        streamer { data, len ->
-            if (isCancelled()) throw CancellationException("NTFS write cancelled.")
-            if (len <= 0) return@streamer
-            sha256Digest.update(data, 0, len)
-            var srcPos = 0
-            var rem = len
-            while (rem > 0) {
-                val space = batchBytes - bufFill
-                val toCopy = minOf(rem, space)
-                System.arraycopy(data, srcPos, writeBuf, bufFill, toCopy)
-                bufFill += toCopy
-                srcPos += toCopy
-                rem -= toCopy
-
-                if (bufFill == batchBytes) {
-                    if (isCancelled()) throw CancellationException("NTFS write cancelled.")
-                    val secCount = batchBytes / blockSize
-                    device.writeBlocks(currentLba, secCount, writeBuf, 0)
-                    currentLba += secCount
-                    totalWritten += batchBytes
-                    onBytesWritten(batchBytes.toLong())
-                    bufFill = 0
-                }
-            }
-        }
-
-        if (bufFill > 0) {
-            if (isCancelled()) throw CancellationException("NTFS write cancelled.")
-            val paddedClusters = (bufFill + clusterSizeBytes - 1) / clusterSizeBytes
-            val paddedBytes = paddedClusters * clusterSizeBytes
-            writeBuf.fill(0, bufFill, paddedBytes)
-            val secCount = paddedBytes / blockSize
-            device.writeBlocks(currentLba, secCount, writeBuf, 0)
-            totalWritten += bufFill
-            onBytesWritten(bufFill.toLong())
-        }
-
-        if (totalWritten != sizeBytes) {
-            throw IOException(
-                "NTFS stream size mismatch for '$normalizedPath': expected=$sizeBytes, got=$totalWritten"
-            )
-        }
+        val shaHex = FileSystemIoHelpers.streamToContiguousClusters(
+            device = device,
+            normalizedPath = normalizedPath,
+            fsLabel = "NTFS",
+            startLba = clusterToLba(startLcn),
+            expectedSizeBytes = sizeBytes,
+            blockSize = blockSize,
+            clusterSizeBytes = clusterSizeBytes,
+            batchBytes = batchBytes,
+            writeBuf = reusableIoBuffer,
+            digest = sha256Digest,
+            isCancelled = isCancelled,
+            streamer = streamer,
+            onBytesWritten = onBytesWritten
+        )
 
         parent.childrenFiles.add(
             FileNode(
@@ -260,7 +261,7 @@ class NtfsFileSystem(
             sizeBytes = sizeBytes,
             firstCluster = startLcn,
             clusterCount = neededClusters,
-            sha256Hex = ByteUtils.toHex(sha256Digest.digest())
+            sha256Hex = shaHex
         )
         writtenFiles.add(rec)
         return rec
@@ -347,10 +348,34 @@ class NtfsFileSystem(
             // Sort items strictly using the volume's $UpCase collation rule
             items.sortWith { a, b -> compareNtfsNames(a.name, b.name) }
 
+            val maxSmallBytes: Int
+            val maxLargeBytes: (Int) -> Int
+            if (dir === rootDir) {
+                // Header(56)+End(8)+StdInfo(72)+FN(96)+SecDesc(104)+IndexRootHdr(64) = 400
+                maxSmallBytes = minOf(MAX_RESIDENT_INDEX_ENTRIES_BYTES, MFT_RECORD_SIZE - 400)
+                maxLargeBytes = { indxCount ->
+                    val bmpLen = maxOf(8, ((indxCount + 63) / 64) * 8)
+                    val bmpAttr = ((32 + bmpLen + 7) / 8) * 8
+                    minOf(MAX_RESIDENT_INDEX_ENTRIES_BYTES, (MFT_RECORD_SIZE - 400 - 96 - bmpAttr).coerceAtLeast(24))
+                }
+            } else {
+                val fnAttrLen = ((24 + (66 + dir.name.length * 2) + 7) / 8) * 8
+                // Header(56)+End(8)+StdInfo(96)+fnAttrLen+IndexRootHdr(64) = 224 + fnAttrLen
+                val fixedBytes = 224 + fnAttrLen
+                maxSmallBytes = minOf(MAX_RESIDENT_INDEX_ENTRIES_BYTES, (MFT_RECORD_SIZE - fixedBytes).coerceAtLeast(0))
+                maxLargeBytes = { indxCount ->
+                    val bmpLen = maxOf(8, ((indxCount + 63) / 64) * 8)
+                    val bmpAttr = ((32 + bmpLen + 7) / 8) * 8
+                    minOf(MAX_RESIDENT_INDEX_ENTRIES_BYTES, (MFT_RECORD_SIZE - fixedBytes - 96 - bmpAttr).coerceAtLeast(24))
+                }
+            }
+
             // Root directory '.' always uses LARGE_INDEX (at least 1 INDX block) to match standard mkntfs
             val (irBytes, indxBlocks, bmpBytes) = packDirectoryBTree(
                 sortedItems = items,
-                forceLargeIndex = (dir === rootDir)
+                forceLargeIndex = (dir === rootDir),
+                maxSmallRootBytes = maxSmallBytes,
+                maxLargeRootBytesForIndxCount = maxLargeBytes
             )
             dirIndexRoots[dir.mftRecordNo] = irBytes
             if (indxBlocks.isNotEmpty()) {
@@ -366,38 +391,42 @@ class NtfsFileSystem(
         }
 
         // 3. Write $MFT $BITMAP at mftBitmapLcn
-        val mftBmpCluster = ByteArray(clusterSizeBytes)
+        val mftBmpBuf = ByteArray(mftBitmapClusters.toInt() * clusterSizeBytes)
         val mftBmpBytesLen = (((totalMftRecords + 7) / 8 + 7) / 8) * 8
         for (bit in 0 until 16) {
-            mftBmpCluster[bit / 8] = (mftBmpCluster[bit / 8].toInt() or (1 shl (bit % 8))).toByte()
+            mftBmpBuf[bit / 8] = (mftBmpBuf[bit / 8].toInt() or (1 shl (bit % 8))).toByte()
         }
         for (bit in FIRST_USER_MFT_RECORD until nextMftNo) {
-            mftBmpCluster[bit / 8] = (mftBmpCluster[bit / 8].toInt() or (1 shl (bit % 8))).toByte()
+            mftBmpBuf[bit / 8] = (mftBmpBuf[bit / 8].toInt() or (1 shl (bit % 8))).toByte()
         }
-        device.writeBlocks(clusterToLcnLba(mftBitmapLcn), sectorsPerCluster, mftBmpCluster, 0)
+        device.writeBlocks(clusterToLba(mftBitmapLcn), (mftBitmapClusters.toInt() * sectorsPerCluster), mftBmpBuf, 0)
 
         // 4. Write $AttrDef at attrDefLcn
         val attrDefCluster = ByteArray(clusterSizeBytes)
         val attrDefBytes = buildAttrDefTable()
         System.arraycopy(attrDefBytes, 0, attrDefCluster, 0, attrDefBytes.size)
-        device.writeBlocks(clusterToLcnLba(attrDefLcn), sectorsPerCluster, attrDefCluster, 0)
+        device.writeBlocks(clusterToLba(attrDefLcn), sectorsPerCluster, attrDefCluster, 0)
 
         // 5. Write $Secure $SDS at secureSdsLcn (and 256 KiB mirror at secureSdsLcn + 64)
         val sdsCluster = ByteArray(clusterSizeBytes)
         System.arraycopy(SDS_256_BYTES, 0, sdsCluster, 0, SDS_256_BYTES.size)
-        val zeroCluster = ByteArray(clusterSizeBytes)
-        device.writeBlocks(clusterToLcnLba(secureSdsLcn), sectorsPerCluster, sdsCluster, 0)
-        for (c in 1L until 64L) {
-            device.writeBlocks(clusterToLcnLba(secureSdsLcn + c), sectorsPerCluster, zeroCluster, 0)
+        device.writeBlocks(clusterToLba(secureSdsLcn), sectorsPerCluster, sdsCluster, 0)
+        // Batch zeroing of middle 63 clusters into chunked writes using reusableIoBuffer
+        reusableIoBuffer.fill(0)
+        var zeroClusterOffset = 1L
+        while (zeroClusterOffset < 64L) {
+            val batch = minOf(batchClusters.toLong(), 64L - zeroClusterOffset).toInt()
+            device.writeBlocks(clusterToLba(secureSdsLcn + zeroClusterOffset), batch * sectorsPerCluster, reusableIoBuffer, 0)
+            zeroClusterOffset += batch
         }
-        device.writeBlocks(clusterToLcnLba(secureSdsLcn + 64L), sectorsPerCluster, sdsCluster, 0)
+        device.writeBlocks(clusterToLba(secureSdsLcn + 64L), sectorsPerCluster, sdsCluster, 0)
 
         // 6. Write $UpCase (128 KiB = 32 clusters) at upCaseLcn
         val upCaseBytes = ByteArray(131_072)
         for (i in 0 until 65536) {
             ByteUtils.writeU16LE(upCaseBytes, i * 2, upCaseMap[i])
         }
-        device.writeBlocks(clusterToLcnLba(upCaseLcn), upCaseBytes.size / blockSize, upCaseBytes, 0)
+        device.writeBlocks(clusterToLba(upCaseLcn), upCaseBytes.size / blockSize, upCaseBytes, 0)
 
         // 7. Write $LogFile (clean unmounted 0xFF journal) at logFileLcn
         writeCleanLogFile()
@@ -434,32 +463,22 @@ class NtfsFileSystem(
         record: WrittenFileAllocation,
         onBytesVerified: (Long) -> Unit = {}
     ): Boolean {
-        sha256Digest.reset()
-        if (record.sizeBytes == 0L) {
-            return ByteUtils.toHex(sha256Digest.digest()) == record.sha256Hex
-        }
-
-        val readBuf = reusableIoBuffer
-        var currentLba = clusterToLba(record.firstCluster)
-        var remainingBytes = record.sizeBytes
-        var remainingClusters = record.clusterCount
-
-        while (remainingClusters > 0L) {
-            if (isCancelled()) throw CancellationException("NTFS verification cancelled.")
-            val clustersToRead = minOf(remainingClusters, batchClusters.toLong()).toInt()
-            val sectorsToRead = clustersToRead * sectorsPerCluster
-            device.readBlocks(currentLba, sectorsToRead, readBuf, 0)
-
-            val validBytes = minOf(remainingBytes, (clustersToRead * clusterSizeBytes).toLong()).toInt()
-            sha256Digest.update(readBuf, 0, validBytes)
-            onBytesVerified(validBytes.toLong())
-
-            currentLba += sectorsToRead
-            remainingClusters -= clustersToRead
-            remainingBytes -= validBytes
-        }
-
-        return ByteUtils.toHex(sha256Digest.digest()) == record.sha256Hex
+        return FileSystemIoHelpers.verifyFromContiguousClusters(
+            device = device,
+            fsLabel = "NTFS",
+            startLba = if (record.sizeBytes > 0L) clusterToLba(record.firstCluster) else 0L,
+            sizeBytes = record.sizeBytes,
+            clusterCount = record.clusterCount,
+            blockSize = blockSize,
+            clusterSizeBytes = clusterSizeBytes,
+            sectorsPerCluster = sectorsPerCluster,
+            batchClusters = batchClusters,
+            readBuf = reusableIoBuffer,
+            digest = sha256Digest,
+            expectedSha256Hex = record.sha256Hex,
+            isCancelled = isCancelled,
+            onBytesVerified = onBytesVerified
+        )
     }
 
     private fun allocateContiguousClusters(count: Long): Long {
@@ -475,7 +494,6 @@ class NtfsFileSystem(
     }
 
     private fun clusterToLba(lcn: Long): Long = lcn * sectorsPerCluster.toLong()
-    private fun clusterToLcnLba(lcn: Long): Long = lcn * sectorsPerCluster.toLong()
 
     private fun writeCleanLogFile() {
         val chunkClusters = minOf(16L, logFileClusters).toInt()
@@ -550,19 +568,34 @@ class NtfsFileSystem(
         dirIndxAllocations: Map<Int, Pair<Long, Int>>,
         dirIndexBitmaps: Map<Int, ByteArray>
     ) {
-        val mftBytes = ByteArray(totalMftRecords * MFT_RECORD_SIZE)
+        val chunkRecords = 64 // 64 KiB (16 clusters) streaming buffer
+        val mftChunkBuf = ByteArray(chunkRecords * MFT_RECORD_SIZE)
+        val mftMirrBuf = ByteArray(4 * MFT_RECORD_SIZE)
+        var bufferedCount = 0
+        var mftWriteLba = clusterToLba(mftStartLcn)
 
-        fun putRecord(recNo: Int, bytes: ByteArray) {
-            System.arraycopy(bytes, 0, mftBytes, recNo * MFT_RECORD_SIZE, MFT_RECORD_SIZE)
+        fun emitRecord(recNo: Int, bytes: ByteArray) {
+            if (recNo < 4) {
+                System.arraycopy(bytes, 0, mftMirrBuf, recNo * MFT_RECORD_SIZE, MFT_RECORD_SIZE)
+            }
+            System.arraycopy(bytes, 0, mftChunkBuf, bufferedCount * MFT_RECORD_SIZE, MFT_RECORD_SIZE)
+            bufferedCount++
+            if (bufferedCount == chunkRecords) {
+                val sectors = (bufferedCount * MFT_RECORD_SIZE) / blockSize
+                device.writeBlocks(mftWriteLba, sectors, mftChunkBuf, 0)
+                mftWriteLba += sectors
+                bufferedCount = 0
+            }
         }
 
         val mftAllocBytes = activeMftClusters * clusterSizeBytes.toLong()
+        val mftBmpAllocBytes = mftBitmapClusters * clusterSizeBytes.toLong()
         val logBytes = logFileClusters * clusterSizeBytes.toLong()
         val sdsDataBytes = 262_144L + SDS_256_BYTES.size.toLong()
         val sdsAllocBytes = secureSdsClusters * clusterSizeBytes.toLong()
 
         // MFT[0]: $MFT
-        putRecord(
+        emitRecord(
             0,
             buildMftRecord(
                 recNo = 0,
@@ -572,13 +605,13 @@ class NtfsFileSystem(
                     AttrSpec.Resident(0x10, "", buildStandardInfo(0x06, 0x0100, size48 = false)),
                     AttrSpec.Resident(0x30, "", buildFileNameValue(5, 5, "\$MFT", mftAllocBytes, activeMftBytes, 0x06)),
                     AttrSpec.NonResident(0x80, "", mftStartLcn, activeMftClusters, activeMftBytes, mftAllocBytes, activeMftBytes),
-                    AttrSpec.NonResident(0xB0, "", mftBitmapLcn, 1L, mftBmpBytesLen.toLong(), clusterSizeBytes.toLong(), mftBmpBytesLen.toLong())
+                    AttrSpec.NonResident(0xB0, "", mftBitmapLcn, mftBitmapClusters, mftBmpBytesLen.toLong(), mftBmpAllocBytes, mftBmpBytesLen.toLong())
                 )
             )
         )
 
         // MFT[1]: $MFTMirr
-        putRecord(
+        emitRecord(
             1,
             buildMftRecord(
                 recNo = 1,
@@ -593,7 +626,7 @@ class NtfsFileSystem(
         )
 
         // MFT[2]: $LogFile
-        putRecord(
+        emitRecord(
             2,
             buildMftRecord(
                 recNo = 2,
@@ -612,7 +645,7 @@ class NtfsFileSystem(
             this[8] = 3 // Major version 3
             this[9] = 1 // Minor version 1
         }
-        putRecord(
+        emitRecord(
             3,
             buildMftRecord(
                 recNo = 3,
@@ -630,7 +663,7 @@ class NtfsFileSystem(
         )
 
         // MFT[4]: $AttrDef
-        putRecord(
+        emitRecord(
             4,
             buildMftRecord(
                 recNo = 4,
@@ -648,7 +681,7 @@ class NtfsFileSystem(
         // MFT[5]: '.' (Root Directory)
         val (rootIndxLcn, rootIndxCount) = dirIndxAllocations.getValue(5)
         val rootIndxBytes = rootIndxCount.toLong() * clusterSizeBytes.toLong()
-        putRecord(
+        emitRecord(
             5,
             buildMftRecord(
                 recNo = 5,
@@ -667,7 +700,7 @@ class NtfsFileSystem(
 
         // MFT[6]: $Bitmap
         val volBmpAllocBytes = volBitmapClusters * clusterSizeBytes.toLong()
-        putRecord(
+        emitRecord(
             6,
             buildMftRecord(
                 recNo = 6,
@@ -683,7 +716,7 @@ class NtfsFileSystem(
 
         // MFT[7]: $Boot
         val bootBytes = 2L * clusterSizeBytes.toLong()
-        putRecord(
+        emitRecord(
             7,
             buildMftRecord(
                 recNo = 7,
@@ -700,7 +733,7 @@ class NtfsFileSystem(
 
         // MFT[8]: $BadClus
         val badTotalBytes = totalClusters * clusterSizeBytes.toLong()
-        putRecord(
+        emitRecord(
             8,
             buildMftRecord(
                 recNo = 8,
@@ -716,7 +749,7 @@ class NtfsFileSystem(
         )
 
         // MFT[9]: $Secure
-        putRecord(
+        emitRecord(
             9,
             buildMftRecord(
                 recNo = 9,
@@ -733,7 +766,7 @@ class NtfsFileSystem(
         )
 
         // MFT[10]: $UpCase
-        putRecord(
+        emitRecord(
             10,
             buildMftRecord(
                 recNo = 10,
@@ -748,7 +781,7 @@ class NtfsFileSystem(
         )
 
         // MFT[11]: $Extend
-        putRecord(
+        emitRecord(
             11,
             buildMftRecord(
                 recNo = 11,
@@ -764,7 +797,7 @@ class NtfsFileSystem(
 
         // MFT[12..15]: In-use system reserved records
         for (r in 12..15) {
-            putRecord(
+            emitRecord(
                 r,
                 buildMftRecord(
                     recNo = r,
@@ -781,7 +814,7 @@ class NtfsFileSystem(
 
         // MFT[16..23]: Free reserved system records
         for (r in 16..23) {
-            putRecord(
+            emitRecord(
                 r,
                 buildMftRecord(
                     recNo = r,
@@ -794,66 +827,65 @@ class NtfsFileSystem(
             )
         }
 
-        // User directories & files (MFT[24 .. nextUserMftNo - 1])
+        // User directories & files MUST be emitted in exact ascending MFT record order
+        val userEntries = ArrayList<Pair<Int, () -> ByteArray>>(nextUserMftNo - FIRST_USER_MFT_RECORD)
         for (dir in allDirs) {
             val parentMft = dir.parent?.mftRecordNo ?: 5
             val parentSeq = if (parentMft == 5) 5 else 1
 
             if (dir !== rootDir) {
-                val dirAttrs = mutableListOf<AttrSpec>(
-                    AttrSpec.Resident(0x10, "", buildStandardInfo(ATTR_FILE_ARCHIVE, 0x0101, size48 = false)),
-                    AttrSpec.Resident(
-                        0x30,
-                        "",
-                        buildFileNameValue(parentMft, parentSeq, dir.name, 0L, 0L, ATTR_FILE_ARCHIVE, isDirectory = true)
-                    ),
-                    AttrSpec.Resident(0x90, "\$I30", dirIndexRoots.getValue(dir.mftRecordNo))
-                )
-                val indxAlloc = dirIndxAllocations[dir.mftRecordNo]
-                if (indxAlloc != null) {
-                    val (lcn, count) = indxAlloc
-                    val bytesLen = count.toLong() * clusterSizeBytes.toLong()
-                    dirAttrs.add(AttrSpec.NonResident(0xA0, "\$I30", lcn, count.toLong(), bytesLen, bytesLen, bytesLen))
-                    dirAttrs.add(AttrSpec.Resident(0xB0, "\$I30", dirIndexBitmaps.getValue(dir.mftRecordNo)))
-                }
-                putRecord(
-                    dir.mftRecordNo,
+                userEntries.add(dir.mftRecordNo to {
+                    val dirAttrs = mutableListOf<AttrSpec>(
+                        AttrSpec.Resident(0x10, "", buildStandardInfo(ATTR_FILE_ARCHIVE, 0x0101, size48 = false)),
+                        AttrSpec.Resident(
+                            0x30,
+                            "",
+                            buildFileNameValue(parentMft, parentSeq, dir.name, 0L, 0L, ATTR_FILE_ARCHIVE, isDirectory = true)
+                        ),
+                        AttrSpec.Resident(0x90, "\$I30", dirIndexRoots.getValue(dir.mftRecordNo))
+                    )
+                    val indxAlloc = dirIndxAllocations[dir.mftRecordNo]
+                    if (indxAlloc != null) {
+                        val (lcn, count) = indxAlloc
+                        val bytesLen = count.toLong() * clusterSizeBytes.toLong()
+                        dirAttrs.add(AttrSpec.NonResident(0xA0, "\$I30", lcn, count.toLong(), bytesLen, bytesLen, bytesLen))
+                        dirAttrs.add(AttrSpec.Resident(0xB0, "\$I30", dirIndexBitmaps.getValue(dir.mftRecordNo)))
+                    }
                     buildMftRecord(
                         recNo = dir.mftRecordNo,
                         seqNo = 1,
                         flags = FLAG_IN_USE or FLAG_DIRECTORY,
                         attrs = dirAttrs
                     )
-                )
+                })
             }
 
             val thisDirSeq = if (dir === rootDir) 5 else 1
             for (file in dir.childrenFiles) {
-                val allocBytes = file.clusterCount * clusterSizeBytes.toLong()
-                val fn = buildFileNameValue(
-                    parentMft = dir.mftRecordNo,
-                    parentSeq = thisDirSeq,
-                    name = file.name,
-                    allocatedSize = allocBytes,
-                    dataSize = file.sizeBytes,
-                    fileAttrs = ATTR_FILE_ARCHIVE,
-                    isDirectory = false
-                )
-                val dataAttr = if (file.clusterCount == 0L) {
-                    AttrSpec.Resident(0x80, "", ByteArray(0))
-                } else {
-                    AttrSpec.NonResident(
-                        type = 0x80,
-                        name = "",
-                        startLcn = file.startLcn,
-                        clusterCount = file.clusterCount,
-                        dataSize = file.sizeBytes,
+                userEntries.add(file.mftRecordNo to {
+                    val allocBytes = file.clusterCount * clusterSizeBytes.toLong()
+                    val fn = buildFileNameValue(
+                        parentMft = dir.mftRecordNo,
+                        parentSeq = thisDirSeq,
+                        name = file.name,
                         allocatedSize = allocBytes,
-                        initializedSize = file.sizeBytes
+                        dataSize = file.sizeBytes,
+                        fileAttrs = ATTR_FILE_ARCHIVE,
+                        isDirectory = false
                     )
-                }
-                putRecord(
-                    file.mftRecordNo,
+                    val dataAttr = if (file.clusterCount == 0L) {
+                        AttrSpec.Resident(0x80, "", ByteArray(0))
+                    } else {
+                        AttrSpec.NonResident(
+                            type = 0x80,
+                            name = "",
+                            startLcn = file.startLcn,
+                            clusterCount = file.clusterCount,
+                            dataSize = file.sizeBytes,
+                            allocatedSize = allocBytes,
+                            initializedSize = file.sizeBytes
+                        )
+                    }
                     buildMftRecord(
                         recNo = file.mftRecordNo,
                         seqNo = 1,
@@ -864,13 +896,17 @@ class NtfsFileSystem(
                             dataAttr
                         )
                     )
-                )
+                })
             }
+        }
+        userEntries.sortBy { it.first }
+        for ((recNo, builder) in userEntries) {
+            emitRecord(recNo, builder())
         }
 
         // Trailing free MFT records up to totalMftRecords
         for (r in nextUserMftNo until totalMftRecords) {
-            putRecord(
+            emitRecord(
                 r,
                 buildMftRecord(
                     recNo = r,
@@ -883,9 +919,11 @@ class NtfsFileSystem(
             )
         }
 
-        // Write $MFT to mftStartLcn and $MFTMirr (first 4 records = 4096B) to mftMirrLcn
-        device.writeBlocks(clusterToLba(mftStartLcn), mftBytes.size / blockSize, mftBytes, 0)
-        device.writeBlocks(clusterToLba(mftMirrLcn), clusterSizeBytes / blockSize, mftBytes, 0)
+        if (bufferedCount > 0) {
+            val sectors = (bufferedCount * MFT_RECORD_SIZE) / blockSize
+            device.writeBlocks(mftWriteLba, sectors, mftChunkBuf, 0)
+        }
+        device.writeBlocks(clusterToLba(mftMirrLcn), clusterSizeBytes / blockSize, mftMirrBuf, 0)
     }
 
     private fun buildRootSystemIndexItems(
@@ -918,7 +956,9 @@ class NtfsFileSystem(
      */
     private fun packDirectoryBTree(
         sortedItems: List<IndexEntryItem>,
-        forceLargeIndex: Boolean
+        forceLargeIndex: Boolean,
+        maxSmallRootBytes: Int = MAX_RESIDENT_INDEX_ENTRIES_BYTES,
+        maxLargeRootBytesForIndxCount: (Int) -> Int = { MAX_RESIDENT_INDEX_ENTRIES_BYTES }
     ): Triple<ByteArray, List<ByteArray>, ByteArray> {
         if (!forceLargeIndex) {
             val baos = ByteArrayOutputStream()
@@ -927,7 +967,7 @@ class NtfsFileSystem(
             }
             baos.write(buildEndIndexEntry(null))
             val leafBytes = baos.toByteArray()
-            if (leafBytes.size <= MAX_RESIDENT_INDEX_ENTRIES_BYTES) {
+            if (leafBytes.size <= maxSmallRootBytes) {
                 return Triple(
                     buildIndexRoot(0x30, 1, leafBytes, isLarge = false),
                     emptyList(),
@@ -951,7 +991,7 @@ class NtfsFileSystem(
                     }
                 }
                 val rootEntries = baos.toByteArray()
-                if (rootEntries.size <= MAX_RESIDENT_INDEX_ENTRIES_BYTES) {
+                if (rootEntries.size <= maxLargeRootBytesForIndxCount(indxBlocks.size)) {
                     val bmpLen = maxOf(8, ((indxBlocks.size + 63) / 64) * 8)
                     val bmp = ByteArray(bmpLen)
                     for (b in indxBlocks.indices) {
@@ -1103,6 +1143,9 @@ class NtfsFileSystem(
                     sparse = attr.sparse
                 )
             }
+            if (pos + ab.size + 8 > MFT_RECORD_SIZE) {
+                throw IOException("MFT record #$recNo overflow (${pos + ab.size + 8} > $MFT_RECORD_SIZE bytes)")
+            }
             System.arraycopy(ab, 0, rec, pos, ab.size)
             pos += ab.size
             instance++
@@ -1215,6 +1258,9 @@ class NtfsFileSystem(
         ByteUtils.writeI32LE(buf, 32, allocIdxSize)
         buf[36] = if (isNode) 1 else 0
 
+        if (64 + entriesBytes.size > clusterSizeBytes) {
+            throw IOException("NTFS INDX block $vcn overflow (${64 + entriesBytes.size} > $clusterSizeBytes bytes)")
+        }
         System.arraycopy(entriesBytes, 0, buf, 64, entriesBytes.size)
         applyUsaFixup(buf, usaOff, usaCount, DEFAULT_USN)
         return buf
@@ -1397,7 +1443,8 @@ class NtfsFileSystem(
 
         private fun encodeRunlist(startLcn: Long, count: Long, sparse: Boolean): ByteArray {
             if (count <= 0L) return byteArrayOf(0)
-            val countBytes = minUnsignedBytesLE(count)
+            // NTFS mapping pairs require signed minimal LE integers; values with bit 7 set get a leading 0x00 byte
+            val countBytes = minSignedBytesLE(count)
             if (sparse) {
                 val out = ByteArray(1 + countBytes.size + 1)
                 out[0] = (countBytes.size and 0x0F).toByte()
@@ -1410,16 +1457,6 @@ class NtfsFileSystem(
             System.arraycopy(countBytes, 0, out, 1, countBytes.size)
             System.arraycopy(lcnBytes, 0, out, 1 + countBytes.size, lcnBytes.size)
             return out
-        }
-
-        private fun minUnsignedBytesLE(value: Long): ByteArray {
-            val full = ByteArray(8)
-            ByteUtils.writeI64LE(full, 0, value)
-            var len = 8
-            while (len > 1 && full[len - 1].toInt() == 0) {
-                len--
-            }
-            return full.copyOf(len)
         }
 
         private fun minSignedBytesLE(value: Long): ByteArray {

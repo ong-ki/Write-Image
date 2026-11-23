@@ -1,9 +1,13 @@
 package com.usbbootable.creator.core.image
 
-enum class FlashingMode(val label: String) {
-    AUTO("Automatic ISO Detection"),
-    WINDOWS("Windows Bootable USB"),
-    LINUX("Linux Bootable USB")
+enum class FlashingMode(
+    val label: String,
+    /** Compact label for space-constrained UI such as the 3-column Home selector. */
+    val shortLabel: String
+) {
+    AUTO("Automatic ISO Detection", "Auto Detect"),
+    WINDOWS("Windows Bootable USB", "Windows"),
+    LINUX("Linux Bootable USB", "Linux")
 }
 
 enum class DetectedOsFamily {

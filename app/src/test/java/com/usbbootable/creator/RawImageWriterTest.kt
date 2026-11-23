@@ -43,7 +43,7 @@ class RawImageWriterTest {
         val dev = InMemoryBlockDevice(totalBlocks = 4096, blockSize = 512)
         val orchestrator = BootableUsbOrchestrator(OperationLogger())
 
-        val phases = mutableListOf<WritePhase>()
+        val progressEvents = mutableListOf<com.usbbootable.creator.core.writer.WriteProgress>()
         val result = orchestrator.execute(
             source = source,
             device = dev,
@@ -51,10 +51,12 @@ class RawImageWriterTest {
             targetDeviceName = "Test USB",
             isCancelled = { false },
             isDisconnected = { false },
-            onProgress = { phases.add(it.phase) }
+            onProgress = { progressEvents.add(it) }
         )
 
+        val phases = progressEvents.map { it.phase }
         assertEquals(WritePhase.COMPLETED, result.phase)
+        assertEquals(img.size.toLong(), result.bytesWritten)
         val report = result.verificationReport
         assertNotNull(report)
         assertTrue(report!!.verified)
@@ -63,6 +65,16 @@ class RawImageWriterTest {
         assertTrue(dev.syncCount >= 1)
         assertTrue(phases.contains(WritePhase.WRITING))
         assertTrue(phases.contains(WritePhase.VERIFYING))
+
+        // Verify confirmed bytesWritten is monotonically non-decreasing and stays at full size during VERIFYING
+        var maxSeenWritten = 0L
+        for (event in progressEvents) {
+            assertTrue("bytesWritten must be monotonic", event.bytesWritten >= maxSeenWritten)
+            maxSeenWritten = event.bytesWritten
+            if (event.phase == WritePhase.VERIFYING) {
+                assertEquals(img.size.toLong(), event.bytesWritten)
+            }
+        }
     }
 
     @Test

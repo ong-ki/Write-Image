@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "USBBootableCreator"
+rootProject.name = "Write-Image"
 include(":app")

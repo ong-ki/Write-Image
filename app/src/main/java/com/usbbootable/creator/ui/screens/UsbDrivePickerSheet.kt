@@ -40,6 +40,9 @@ import androidx.compose.ui.unit.dp
 import com.usbbootable.creator.core.usb.UsbDriveInfo
 import com.usbbootable.creator.core.usb.UsbTransportSupport
 import com.usbbootable.creator.core.util.ByteUtils
+import com.usbbootable.creator.ui.theme.GlassSheetShape
+import com.usbbootable.creator.ui.theme.glassDialogContainerColor
+import com.usbbootable.creator.ui.theme.glassScrimColor
 import com.usbbootable.creator.ui.theme.statusSuccessColor
 import com.usbbootable.creator.ui.theme.statusWarningColor
 
@@ -60,7 +63,9 @@ fun UsbDrivePickerSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surface
+        shape = GlassSheetShape,
+        containerColor = glassDialogContainerColor(),
+        scrimColor = glassScrimColor()
     ) {
         Column(
             modifier = Modifier
@@ -73,7 +78,7 @@ fun UsbDrivePickerSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Select Target USB Drive",
                         style = MaterialTheme.typography.titleLarge
@@ -84,6 +89,7 @@ fun UsbDrivePickerSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                Spacer(modifier = Modifier.width(8.dp))
                 IconButton(onClick = onRefresh) {
                     Icon(
                         imageVector = Icons.Rounded.Refresh,
@@ -282,8 +288,10 @@ fun UsbDrivePickerSheet(
                                                 text = ByteUtils.formatDecimalCapacity(drive.capacityBytes),
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.SemiBold,
-                                                color = statusSuccessColor()
+                                                color = statusSuccessColor(),
+                                                modifier = Modifier.weight(1f)
                                             )
+                                            Spacer(modifier = Modifier.width(8.dp))
                                             Text(
                                                 text = "${drive.logicalBlockSize} B sectors",
                                                 style = MaterialTheme.typography.labelSmall,

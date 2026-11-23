@@ -38,8 +38,12 @@ class SpeedTracker(
         val dtNanos = now - oldest.timeNanos
         val dBytes = totalBytesProcessed - oldest.totalBytes
 
-        val speedBytesPerSec = if (dtNanos >= 200_000_000L && dBytes > 0L) {
-            dBytes.toDouble() / (dtNanos.toDouble() / 1_000_000_000.0)
+        val speedBytesPerSec = if (dtNanos >= 200_000_000L) {
+            if (dBytes > 0L) {
+                dBytes.toDouble() / (dtNanos.toDouble() / 1_000_000_000.0)
+            } else {
+                0.0
+            }
         } else {
             val totalDt = now - startTimeNanos
             if (totalDt >= 200_000_000L && totalBytesProcessed > 0L) {
@@ -50,10 +54,12 @@ class SpeedTracker(
         }
 
         val remainingBytes = (totalExpectedBytes - totalBytesProcessed).coerceAtLeast(0L)
-        val etaSec = if (speedBytesPerSec > 1.0) {
-            (remainingBytes.toDouble() / speedBytesPerSec).toLong()
-        } else {
-            -1L
+        val etaSec = when {
+            remainingBytes == 0L -> 0L
+            speedBytesPerSec > 1.0 -> kotlin.math.ceil(remainingBytes.toDouble() / speedBytesPerSec)
+                .toLong()
+                .coerceAtLeast(1L)
+            else -> -1L
         }
 
         return Pair(speedBytesPerSec, etaSec)

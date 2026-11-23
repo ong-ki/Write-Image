@@ -1,42 +1,35 @@
 package com.usbbootable.creator.ui.screens
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.Usb
 import androidx.compose.material.icons.rounded.VerifiedUser
-import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -46,346 +39,253 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.usbbootable.creator.core.image.SelectedIsoInfo
-import com.usbbootable.creator.core.usb.UsbDriveInfo
-import com.usbbootable.creator.core.usb.UsbTransportSupport
 import com.usbbootable.creator.core.util.ByteUtils
+import com.usbbootable.creator.core.writer.TransferSpeedSnapshot
 import com.usbbootable.creator.core.writer.WritePhase
 import com.usbbootable.creator.core.writer.WriteProgress
-import com.usbbootable.creator.ui.DashboardUiState
+import com.usbbootable.creator.ui.GuidedStepText
+import com.usbbootable.creator.ui.theme.CyanAccentBright
+import com.usbbootable.creator.ui.theme.ElectricBlue
+import com.usbbootable.creator.ui.theme.ElectricBlueBright
+import com.usbbootable.creator.ui.theme.GlassCardShape14
+import com.usbbootable.creator.ui.theme.GlassCardShape16
+import com.usbbootable.creator.ui.theme.GlassCardSurface
+import com.usbbootable.creator.ui.theme.GlassMotion
+import com.usbbootable.creator.ui.theme.GlassTextWhite
+import com.usbbootable.creator.ui.theme.LocalAppColors
+import com.usbbootable.creator.ui.theme.LocalNeonTheme
+import com.usbbootable.creator.ui.theme.LocalProgressBarStyle
+import com.usbbootable.creator.ui.theme.adaptAccentForSurface
+import com.usbbootable.creator.ui.theme.effectivePrimaryColor
+import com.usbbootable.creator.ui.theme.effectiveSecondaryColor
+import com.usbbootable.creator.ui.theme.pressScale
+import com.usbbootable.creator.ui.theme.rememberMotionEnabled
 import com.usbbootable.creator.ui.theme.statusSuccessColor
 import com.usbbootable.creator.ui.theme.statusWarningColor
+import kotlin.math.floor
+import kotlin.math.log10
+import kotlin.math.pow
 import kotlin.math.roundToInt
+import java.util.Locale
 
-@Composable
-fun CreateUsbTabContent(
-    state: DashboardUiState,
-    onSelectIsoClick: () -> Unit,
-    onOpenDrivePicker: () -> Unit,
-    onRequestUsbPermission: (Int) -> Unit,
-    onRetryProbeDrive: (Int) -> Unit,
-    onRequestCreateConfirm: () -> Unit,
-    onCancelWrite: () -> Unit,
-    onDismissFinishedStatus: () -> Unit
-) {
-    val isWriting = state.writeProgress.phase.isActive
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        // Active Write / Verify / Completed / Failed / Cancelled Progress Panel
-        ActiveOperationCard(
-            progress = state.writeProgress,
-            fallbackTotalBytes = state.selectedIso?.sizeBytes ?: 0L,
-            isReadyToStart = state.preflight.canProceed,
-            onCancel = onCancelWrite,
-            onDismissFinished = onDismissFinishedStatus
-        )
-
-        // Primary Action Buttons: SELECT ISO, SELECT USB DRIVE, CREATE BOOTABLE USB
-        MainActionsSection(
-            isWriting = isWriting,
-            connectedDriveCount = state.availableDrives.size,
-            canCreate = state.preflight.canProceed && !isWriting && !state.isAnalyzingIso,
-            onSelectIsoClick = onSelectIsoClick,
-            onSelectUsbClick = onOpenDrivePicker,
-            onCreateClick = onRequestCreateConfirm
-        )
-
-        // Transparent Pre-flight Blockers when Create is disabled
-        if (!isWriting && state.preflight.blockers.isNotEmpty() && (state.selectedIso != null || state.selectedDrive != null)) {
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = "Required Before Flashing",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    state.preflight.blockers.forEach { blocker ->
-                        Row(verticalAlignment = Alignment.Top) {
-                            Text(
-                                text = "• ",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = statusWarningColor(),
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = blocker,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Selected ISO Details & Bootability Analysis
-        IsoSummaryCard(
-            iso = state.selectedIso,
-            isAnalyzing = state.isAnalyzingIso,
-            isoError = state.isoError
-        )
-
-        // Target USB OTG Drive Details
-        UsbDriveSummaryCard(
-            drive = state.selectedDrive,
-            totalDetected = state.availableDrives.size,
-            onGrantPermission = onRequestUsbPermission,
-            onRetryProbe = onRetryProbeDrive
-        )
-
-        Spacer(modifier = Modifier.height(6.dp))
-    }
-}
-
-@Composable
-private fun ReadinessOverviewCard(state: DashboardUiState) {
-    val step1Ready = state.selectedIso != null && state.selectedIso.isAccessible
-    val step2Ready = state.selectedDrive != null &&
-        state.selectedDrive.hasPermission &&
-        state.selectedDrive.isProbed &&
-        !state.selectedDrive.isWriteProtected
-    val step3Ready = state.preflight.canProceed
-
-    Card(
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Flash Pipeline",
-                    style = MaterialTheme.typography.titleMedium
-                )
-                StatusPill(
-                    text = if (step3Ready) "READY TO FLASH" else "SETUP REQUIRED",
-                    color = if (step3Ready) statusSuccessColor() else MaterialTheme.colorScheme.primary
-                )
-            }
-            Spacer(modifier = Modifier.height(14.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                PipelineStep(number = "1", label = "ISO Image", ready = step1Ready, modifier = Modifier.weight(1f))
-                PipelineStep(number = "2", label = "USB OTG", ready = step2Ready, modifier = Modifier.weight(1f))
-                PipelineStep(number = "3", label = "Write & Verify", ready = step3Ready, modifier = Modifier.weight(1f))
-            }
-        }
-    }
-}
-
-@Composable
-private fun PipelineStep(
-    number: String,
-    label: String,
-    ready: Boolean,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Surface(
-            shape = RoundedCornerShape(50),
-            color = if (ready) {
-                statusSuccessColor().copy(alpha = 0.16f)
-            } else {
-                MaterialTheme.colorScheme.surfaceVariant
-            },
-            modifier = Modifier.size(34.dp)
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                if (ready) {
-                    Icon(
-                        imageVector = Icons.Rounded.CheckCircle,
-                        contentDescription = null,
-                        tint = statusSuccessColor(),
-                        modifier = Modifier.size(20.dp)
-                    )
-                } else {
-                    Text(
-                        text = number,
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = if (ready) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
+private val PillShape = RoundedCornerShape(8.dp)
+private val ErrorBoxShape = RoundedCornerShape(10.dp)
+private val ChartBoxShape = RoundedCornerShape(14.dp)
+private const val SPEED_CHART_WINDOW_MS = 20_000L
+private const val BYTES_PER_MB = 1024.0 * 1024.0
 
 @Composable
 internal fun MainActionsSection(
-    isWriting: Boolean,
-    connectedDriveCount: Int,
     canCreate: Boolean,
-    onSelectIsoClick: () -> Unit,
-    onSelectUsbClick: () -> Unit,
+    isFlashing: Boolean = false,
+    guideActive: Boolean = false,
+    guideError: Boolean = false,
     onCreateClick: () -> Unit
 ) {
-    Column(
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            FilledTonalButton(
-                onClick = onSelectIsoClick,
-                enabled = !isWriting,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .height(54.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.FolderOpen,
-                    contentDescription = null,
-                    modifier = Modifier.size(19.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "SELECT ISO",
-                    style = MaterialTheme.typography.labelLarge,
-                    maxLines = 1
-                )
-            }
+    val createInteraction = remember { MutableInteractionSource() }
+    val appColors = LocalAppColors.current
+    val neon = LocalNeonTheme.current
+    val isReady = canCreate && !isFlashing
 
-            FilledTonalButton(
-                onClick = onSelectUsbClick,
-                enabled = !isWriting,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .height(54.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Usb,
-                    contentDescription = null,
-                    modifier = Modifier.size(19.dp)
+    val readyContainerColor = lerp(ElectricBlue, ElectricBlueBright, 0.16f)
+    val glowStrength = if (neon.neonEnabled) {
+        (0.55f + 0.45f * neon.glowIntensity).coerceIn(0.45f, 1.0f)
+    } else {
+        0.35f
+    }
+
+    val buttonBorder = if (isReady) {
+        BorderStroke(
+            width = 1.25.dp,
+            color = lerp(ElectricBlueBright, CyanAccentBright, 0.35f).copy(alpha = 0.90f)
+        )
+    } else {
+        BorderStroke(
+            width = 1.dp,
+            color = appColors.borderSubtle.copy(alpha = if (appColors.isDark) 0.65f else 0.90f)
+        )
+    }
+
+    val glowModifier = if (isReady) {
+        Modifier.drawWithCache {
+            val outerExpand = 5.dp.toPx()
+            val innerExpand = 2.dp.toPx()
+            val baseCorner = 14.dp.toPx()
+            val outerColor = ElectricBlueBright.copy(alpha = (0.20f * glowStrength).coerceIn(0f, 0.26f))
+            val innerColor = CyanAccentBright.copy(alpha = (0.22f * glowStrength).coerceIn(0f, 0.28f))
+            onDrawBehind {
+                drawRoundRect(
+                    color = outerColor,
+                    topLeft = Offset(-outerExpand, -outerExpand * 0.7f),
+                    size = Size(size.width + outerExpand * 2f, size.height + outerExpand * 1.4f),
+                    cornerRadius = CornerRadius(baseCorner + outerExpand, baseCorner + outerExpand)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = if (connectedDriveCount > 0) {
-                        "SELECT USB DRIVE ($connectedDriveCount)"
-                    } else {
-                        "SELECT USB DRIVE"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                drawRoundRect(
+                    color = innerColor,
+                    topLeft = Offset(-innerExpand, -innerExpand * 0.6f),
+                    size = Size(size.width + innerExpand * 2f, size.height + innerExpand * 1.2f),
+                    cornerRadius = CornerRadius(baseCorner + innerExpand, baseCorner + innerExpand)
                 )
             }
         }
+    } else {
+        Modifier
+    }
 
-        Button(
-            onClick = onCreateClick,
-            enabled = canCreate,
-            shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(58.dp)
-        ) {
+    val createTextDefaultColor = if (isReady) GlassTextWhite else appColors.textDisabled
+    val createTextGuideColor = when {
+        guideError -> MaterialTheme.colorScheme.error
+        isReady -> lerp(GlassTextWhite, neon.effectiveSecondaryColor, 0.22f)
+        else -> MaterialTheme.colorScheme.primary
+    }
+
+    Button(
+        onClick = {
+            if (isReady) onCreateClick()
+        },
+        enabled = isReady,
+        interactionSource = createInteraction,
+        shape = GlassCardShape14,
+        border = buttonBorder,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = readyContainerColor,
+            contentColor = GlassTextWhite,
+            disabledContainerColor = appColors.disabledCreateContainer,
+            disabledContentColor = appColors.textDisabled
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .pressScale(createInteraction, enabled = isReady)
+            .then(glowModifier)
+    ) {
+        if (isFlashing) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                strokeWidth = 2.dp,
+                color = appColors.textSecondary
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "FLASHING IN PROGRESS",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        } else {
             Icon(
                 imageVector = Icons.Rounded.Bolt,
                 contentDescription = null,
-                modifier = Modifier.size(22.dp)
+                modifier = Modifier.size(19.dp)
             )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
+            Spacer(modifier = Modifier.width(8.dp))
+            GuidedStepText(
                 text = "CREATE BOOTABLE USB",
-                style = MaterialTheme.typography.labelLarge
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                defaultColor = createTextDefaultColor,
+                guideActive = guideActive,
+                guideColor = createTextGuideColor,
+                minAlpha = 0.45f
             )
         }
     }
 }
 
 /**
- * Modern Material 3 circular progress indicator card supporting all 6 visual states:
- * - Waiting (IDLE): Empty circular ring (0%)
- * - Writing (PREPARING / PARTITIONING / WRITING / FLUSHING_CACHE): Animated primary progress ring
- * - Verifying (VERIFYING): Distinct tertiary/teal verification ring with shield icon
- * - Completed (COMPLETED): Full 100% emerald circle with success checkmark icon
- * - Failed (FAILED): Error red indicator ring with error icon
- * - Cancelled (CANCELLED): Amber cancelled ring (snaps immediately without waiting for animation)
+ * Progress card with a separate, Linux-style live transfer-speed graph:
+ * - Graph X-axis: recent write time (fixed 20-second scrolling window)
+ * - Graph Y-axis: real write throughput in MB/s, from confirmed USB write bytes
+ * - Overall completion percentage and progress bar remain independent of the graph.
  */
 @Composable
 internal fun ActiveOperationCard(
     progress: WriteProgress,
+    speedSnapshot: TransferSpeedSnapshot = TransferSpeedSnapshot.EMPTY,
+    elapsedSeconds: Long = 0L,
     fallbackTotalBytes: Long = 0L,
     isReadyToStart: Boolean = false,
+    isStarting: Boolean = false,
     onCancel: () -> Unit,
     onDismissFinished: () -> Unit
 ) {
-    val accentColor = when (progress.phase) {
-        WritePhase.IDLE -> if (isReadyToStart) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-        WritePhase.VERIFYING -> MaterialTheme.colorScheme.tertiary
+    val motionEnabled = rememberMotionEnabled()
+    val appColors = LocalAppColors.current
+    val neon = LocalNeonTheme.current
+    val progressBarStyle = LocalProgressBarStyle.current
+    val neonPrimary = adaptAccentForSurface(neon.effectivePrimaryColor, appColors.isDark)
+    val neonSecondary = adaptAccentForSurface(neon.effectiveSecondaryColor, appColors.isDark)
+    val effectivePhase = if (progress.phase == WritePhase.IDLE && isStarting) {
+        WritePhase.PREPARING
+    } else {
+        progress.phase
+    }
+
+    val targetAccentColor = when (effectivePhase) {
+        WritePhase.IDLE -> if (isReadyToStart) neonPrimary else MaterialTheme.colorScheme.outline
+        WritePhase.VERIFYING -> neonSecondary
         WritePhase.COMPLETED -> statusSuccessColor()
         WritePhase.FAILED -> MaterialTheme.colorScheme.error
         WritePhase.CANCELLED -> statusWarningColor()
-        else -> MaterialTheme.colorScheme.primary
+        else -> neonSecondary
     }
+    val accentColor by animateColorAsState(
+        targetValue = targetAccentColor,
+        animationSpec = tween(
+            durationMillis = if (motionEnabled) GlassMotion.STATUS_DURATION_MS else 0,
+            easing = FastOutSlowInEasing
+        ),
+        label = "progress_accent_color"
+    )
 
-    val targetFraction = when (progress.phase) {
+    val targetFraction = when (effectivePhase) {
         WritePhase.IDLE -> 0f
         WritePhase.COMPLETED -> 1f
-        else -> progress.overallProgress.coerceIn(0f, 1f)
+        else -> progress.overallProgress.coerceIn(0f, 0.995f)
     }
 
     val animatedFraction by animateFloatAsState(
         targetValue = targetFraction,
-        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-        label = "usb_circular_progress"
+        animationSpec = tween(
+            durationMillis = if (motionEnabled) GlassMotion.PROGRESS_DURATION_MS else 0,
+            easing = FastOutSlowInEasing
+        ),
+        label = "usb_area_progress"
     )
 
     // Do NOT wait for animation when Cancelled, Failed, or Idle — snap immediately
-    val displayFraction = when (progress.phase) {
+    val displayFraction = when (effectivePhase) {
         WritePhase.CANCELLED, WritePhase.FAILED, WritePhase.IDLE -> targetFraction
         else -> animatedFraction
     }
 
-    val percentInt = (displayFraction * 100f).roundToInt().coerceIn(0, 100)
+    val percentInt = when (effectivePhase) {
+        WritePhase.COMPLETED -> 100
+        WritePhase.IDLE -> 0
+        else -> (displayFraction * 100f).roundToInt().coerceIn(0, 99)
+    }
 
-    val phaseTitle = when (progress.phase) {
+    val phaseTitle = when (effectivePhase) {
         WritePhase.IDLE -> "WAITING"
         WritePhase.PREPARING -> "PREPARING"
         WritePhase.PARTITIONING -> "PARTITIONING"
@@ -398,166 +298,227 @@ internal fun ActiveOperationCard(
     }
 
     val totalBytesToDisplay = if (progress.totalBytes > 0L) progress.totalBytes else fallbackTotalBytes
-    val writtenBytesToDisplay = when (progress.phase) {
-        WritePhase.IDLE -> 0L
-        WritePhase.COMPLETED -> totalBytesToDisplay
-        else -> progress.bytesProcessed
-    }
+    val writtenBytesToDisplay = when (effectivePhase) {
+        WritePhase.IDLE, WritePhase.PREPARING, WritePhase.PARTITIONING -> 0L
+        WritePhase.COMPLETED -> if (progress.bytesWritten > 0L) progress.bytesWritten else totalBytesToDisplay
+        else -> when {
+            progress.bytesWritten > 0L -> progress.bytesWritten
+            effectivePhase == WritePhase.WRITING || effectivePhase == WritePhase.FLUSHING_CACHE ->
+                progress.bytesProcessed
+            else -> 0L
+        }
+    }.coerceAtLeast(0L)
 
     val statusText = when {
-        progress.phase == WritePhase.IDLE && isReadyToStart ->
+        progress.phase == WritePhase.IDLE && isStarting ->
+            "Starting USB write session..."
+        effectivePhase == WritePhase.IDLE && isReadyToStart ->
             "Ready to write bootable USB drive."
-        progress.phase == WritePhase.IDLE ->
+        effectivePhase == WritePhase.IDLE ->
             "Select an ISO file and USB drive to begin."
         else -> progress.statusMessage
     }
 
-    Card(
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(
-            width = if (progress.phase == WritePhase.IDLE) 1.dp else 1.5.dp,
-            color = accentColor.copy(alpha = if (progress.phase == WritePhase.IDLE) 0.55f else 0.75f)
-        ),
-        modifier = Modifier.fillMaxWidth()
+    val elapsedFormatted = ByteUtils.formatElapsedClock(elapsedSeconds)
+    val writtenTotalFormatted = ByteUtils.formatWrittenTotal(writtenBytesToDisplay, totalBytesToDisplay)
+
+    GlassCardSurface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = GlassCardShape16,
+        accentBorderColor = if (effectivePhase == WritePhase.IDLE && !isReadyToStart) null else accentColor,
+        borderWidth = if (effectivePhase == WritePhase.IDLE) 1.dp else 1.5.dp
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 18.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(horizontal = 12.dp, vertical = 10.dp)
         ) {
-            // Large Circular Progress Ring with Percentage & State Icon in the Center
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier.size(168.dp)
+            // Header Row: Phase Badge + Status on left, Completion Percentage on right
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                CircularProgressIndicator(
-                    progress = { displayFraction },
-                    modifier = Modifier.size(168.dp),
-                    color = accentColor,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                    strokeWidth = 13.dp,
-                    strokeCap = StrokeCap.Round
-                )
-
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                    modifier = Modifier.padding(20.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
                 ) {
-                    when (progress.phase) {
+                    when (effectivePhase) {
                         WritePhase.VERIFYING -> {
                             Icon(
                                 imageVector = Icons.Rounded.VerifiedUser,
                                 contentDescription = "Verifying",
                                 tint = accentColor,
-                                modifier = Modifier.size(22.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.height(2.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
                         }
                         WritePhase.COMPLETED -> {
                             Icon(
                                 imageVector = Icons.Rounded.CheckCircle,
                                 contentDescription = "Completed",
                                 tint = accentColor,
-                                modifier = Modifier.size(26.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.height(2.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
                         }
                         WritePhase.FAILED -> {
                             Icon(
                                 imageVector = Icons.Rounded.ErrorOutline,
                                 contentDescription = "Failed",
                                 tint = accentColor,
-                                modifier = Modifier.size(26.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.height(2.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
                         }
                         WritePhase.CANCELLED -> {
                             Icon(
                                 imageVector = Icons.Rounded.Cancel,
                                 contentDescription = "Cancelled",
                                 tint = accentColor,
-                                modifier = Modifier.size(26.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.height(2.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
                         }
                         else -> Unit
                     }
-
-                    Text(
-                        text = "$percentInt%",
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (progress.phase == WritePhase.IDLE) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            accentColor
-                        }
-                    )
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
                     StatusPill(text = phaseTitle, color = accentColor)
                 }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Text(
+                    text = "$percentInt%",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (effectivePhase == WritePhase.IDLE) {
+                        appColors.textPrimary
+                    } else {
+                        accentColor
+                    }
+                )
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // Current Operation Status
-            Text(
-                text = statusText,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurface
+            // Live transfer-speed waveform (real completed USB writes only)
+            TransferSpeedChart(
+                snapshot = speedSnapshot,
+                phase = effectivePhase,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(94.dp)
             )
 
-            if (progress.currentItemLabel.isNotBlank() && progress.phase != WritePhase.IDLE) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = progress.currentItemLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Speed statistics — independent of overall completion percentage above/below
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                TelemetryMetric(
+                    label = "CURRENT",
+                    value = if (speedSnapshot.isLive && !speedSnapshot.isEmpty) {
+                        ByteUtils.formatSpeed(speedSnapshot.currentBytesPerSec)
+                    } else {
+                        "-- MB/s"
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                TelemetryMetric(
+                    label = "AVERAGE",
+                    value = if (speedSnapshot.isEmpty) {
+                        "-- MB/s"
+                    } else {
+                        ByteUtils.formatSpeed(speedSnapshot.averageBytesPerSec)
+                    },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.weight(1f)
+                )
+                TelemetryMetric(
+                    label = "PEAK",
+                    value = if (speedSnapshot.isEmpty) {
+                        "-- MB/s"
+                    } else {
+                        ByteUtils.formatSpeed(speedSnapshot.peakBytesPerSec)
+                    },
+                    horizontalAlignment = Alignment.End,
+                    modifier = Modifier.weight(1f)
                 )
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // Real-time Telemetry Grid below the Circular Indicator
+            // Selected Progress Bar Style indicator reflecting live completion
+            val barAccentOverride = when (effectivePhase) {
+                WritePhase.FAILED, WritePhase.CANCELLED -> accentColor
+                else -> null
+            }
+            StyledProgressBar(
+                progress = displayFraction,
+                style = progressBarStyle,
+                neonTheme = neon,
+                overrideAccentColor = barAccentOverride,
+                height = 12.dp
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Current Operation Status + Active Item
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+                color = appColors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            val itemDetail = progress.currentItemLabel.takeIf {
+                it.isNotBlank() && effectivePhase != WritePhase.IDLE
+            }
+            if (itemDetail != null) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = itemDetail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = appColors.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = appColors.borderSubtle)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Compact Real-time Telemetry Row: Elapsed Time, Written / Total Size, Remaining Time
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 TelemetryMetric(
-                    label = "WRITTEN / TOTAL",
-                    value = if (totalBytesToDisplay > 0L) {
-                        "${ByteUtils.formatBytes(writtenBytesToDisplay)} / ${ByteUtils.formatBytes(totalBytesToDisplay)}"
-                    } else {
-                        "0 B / --"
-                    }
+                    label = "ELAPSED",
+                    value = elapsedFormatted,
+                    horizontalAlignment = Alignment.Start,
+                    modifier = Modifier.weight(0.75f)
                 )
                 TelemetryMetric(
-                    label = "SPEED",
-                    value = if (progress.phase.isActive) {
-                        ByteUtils.formatSpeed(progress.speedBytesPerSec)
-                    } else {
-                        "-- MB/s"
-                    }
+                    label = "WRITTEN",
+                    value = writtenTotalFormatted,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.weight(1.5f)
                 )
                 TelemetryMetric(
                     label = "REMAINING",
-                    value = if (progress.phase.isActive) {
+                    value = if (effectivePhase.isActive) {
                         ByteUtils.formatDuration(progress.etaSeconds)
                     } else {
                         "--:--"
-                    }
+                    },
+                    horizontalAlignment = Alignment.End,
+                    modifier = Modifier.weight(0.75f)
                 )
             }
 
@@ -611,7 +572,7 @@ internal fun ActiveOperationCard(
                 Spacer(modifier = Modifier.height(12.dp))
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
-                    shape = RoundedCornerShape(10.dp),
+                    shape = ErrorBoxShape,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
@@ -623,23 +584,26 @@ internal fun ActiveOperationCard(
                 }
             }
 
-            // Prominent Cancel button directly below the circular indicator while writing/verifying
-            if (progress.phase.isActive) {
-                Spacer(modifier = Modifier.height(16.dp))
+            // Prominent Cancel button directly below the progress section while writing/verifying
+            if (effectivePhase.isActive) {
+                val cancelInteraction = remember { MutableInteractionSource() }
+                Spacer(modifier = Modifier.height(10.dp))
                 OutlinedButton(
                     onClick = onCancel,
+                    interactionSource = cancelInteraction,
                     border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.error),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp)
+                        .height(42.dp)
+                        .pressScale(cancelInteraction)
                 ) {
-                    Icon(Icons.Rounded.Cancel, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(Icons.Rounded.Cancel, contentDescription = null, modifier = Modifier.size(17.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text("CANCEL", style = MaterialTheme.typography.labelLarge)
                 }
-            } else if (progress.phase != WritePhase.IDLE) {
-                Spacer(modifier = Modifier.height(10.dp))
+            } else if (effectivePhase != WritePhase.IDLE) {
+                Spacer(modifier = Modifier.height(6.dp))
                 TextButton(
                     onClick = onDismissFinished,
                     modifier = Modifier.align(Alignment.End)
@@ -651,350 +615,332 @@ internal fun ActiveOperationCard(
     }
 }
 
+/**
+ * Linux-style live transfer-speed graph.
+ *
+ * X: fixed 20-second scrolling window ending at the newest sample.
+ * Y: real throughput in MB/s, computed only from bytes the USB writer confirmed as written.
+ * The waveform scrolls left as time advances, rises with faster writes, falls as throughput
+ * drops (including zero during stalls), and freezes once the write finishes or disconnects.
+ */
 @Composable
-private fun TelemetryMetric(label: String, value: String) {
-    Column {
+private fun TransferSpeedChart(
+    snapshot: TransferSpeedSnapshot,
+    phase: WritePhase,
+    modifier: Modifier = Modifier
+) {
+    val linePath = remember { Path() }
+    val areaPath = remember { Path() }
+
+    val appColors = LocalAppColors.current
+    val neon = LocalNeonTheme.current
+    val neonPrimary = adaptAccentForSurface(neon.effectivePrimaryColor, appColors.isDark)
+    val neonSecondary = adaptAccentForSurface(neon.effectiveSecondaryColor, appColors.isDark)
+    val glowStrength = if (neon.neonEnabled) neon.glowIntensity else 0.15f
+
+    val errorColor = MaterialTheme.colorScheme.error
+    val warningColor = statusWarningColor()
+    val successColor = statusSuccessColor()
+
+    val lineColors = remember(phase, neonPrimary, neonSecondary, errorColor, warningColor, successColor) {
+        when (phase) {
+            WritePhase.FAILED -> listOf(errorColor, errorColor.copy(alpha = 0.85f))
+            WritePhase.CANCELLED -> listOf(warningColor, warningColor.copy(alpha = 0.85f))
+            WritePhase.COMPLETED -> listOf(neonSecondary, neonPrimary, successColor)
+            else -> listOf(neonSecondary, neonPrimary, neonSecondary)
+        }
+    }
+    val areaColors = remember(phase, neonPrimary, neonSecondary, errorColor, warningColor, successColor) {
+        when (phase) {
+            WritePhase.FAILED -> listOf(errorColor.copy(alpha = 0.28f), Color.Transparent)
+            WritePhase.CANCELLED -> listOf(warningColor.copy(alpha = 0.26f), Color.Transparent)
+            WritePhase.COMPLETED -> listOf(
+                successColor.copy(alpha = 0.26f),
+                neonPrimary.copy(alpha = 0.12f),
+                Color.Transparent
+            )
+            else -> listOf(
+                neonPrimary.copy(alpha = 0.28f),
+                neonSecondary.copy(alpha = 0.12f),
+                Color.Transparent
+            )
+        }
+    }
+    val endpointColor = when (phase) {
+        WritePhase.FAILED -> errorColor
+        WritePhase.CANCELLED -> warningColor
+        WritePhase.COMPLETED -> successColor
+        else -> neonSecondary
+    }
+    val glowColor = when (phase) {
+        WritePhase.FAILED -> errorColor.copy(alpha = 0.20f)
+        WritePhase.CANCELLED -> warningColor.copy(alpha = 0.18f)
+        WritePhase.COMPLETED -> successColor.copy(alpha = 0.20f)
+        else -> neonSecondary.copy(alpha = (0.26f * glowStrength).coerceIn(0.04f, 0.26f))
+    }
+
+    val samples = snapshot.samples
+    val peakMbps = maxOf(snapshot.peakBytesPerSec, snapshot.currentBytesPerSec, 1.0) / BYTES_PER_MB
+    val axisMaxMbps = niceAxisMaximum(peakMbps * 1.15)
+    val axisMaxBytesPerSec = axisMaxMbps * BYTES_PER_MB
+    val live = snapshot.isLive && phase == WritePhase.WRITING
+    val latestElapsedMs = maxOf(snapshot.elapsedMs, samples.lastOrNull()?.elapsedMs ?: 0L)
+    val chartBg = appColors.chartBackground
+    val chartGrid = appColors.chartGridLine
+    val borderSubtle = appColors.borderSubtle
+
+    Box(
+        modifier = modifier
+            .clip(ChartBoxShape)
+            .background(chartBg)
+            .border(1.dp, borderSubtle, ChartBoxShape)
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = 36.dp, end = 4.dp, top = 4.dp, bottom = 15.dp)
+                .drawWithCache {
+                    val lineBrush = Brush.horizontalGradient(colors = lineColors)
+                    val areaBrush = Brush.verticalGradient(colors = areaColors)
+                    val lineStroke = Stroke(
+                        width = 2.2.dp.toPx(),
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round
+                    )
+                    val glowStroke = Stroke(
+                        width = 5.dp.toPx(),
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round
+                    )
+                    val dotOuterRadius = 5.dp.toPx()
+                    val dotInnerRadius = 2.8.dp.toPx()
+
+                    onDrawBehind {
+                        val w = size.width
+                        val h = size.height
+                        if (w <= 1f || h <= 1f) return@onDrawBehind
+
+                        // Subtle horizontal and vertical grid lines
+                        for (step in 0..4) {
+                            val y = h * (step / 4f)
+                            drawLine(
+                                color = chartGrid,
+                                start = Offset(0f, y),
+                                end = Offset(w, y),
+                                strokeWidth = 1f
+                            )
+                        }
+                        for (step in 1..3) {
+                            val x = w * (step / 4f)
+                            drawLine(
+                                color = chartGrid.copy(alpha = 0.6f),
+                                start = Offset(x, 0f),
+                                end = Offset(x, h),
+                                strokeWidth = 1f
+                            )
+                        }
+
+                        if (samples.isEmpty()) {
+                            drawLine(
+                                color = borderSubtle,
+                                start = Offset(0f, h),
+                                end = Offset(w, h),
+                                strokeWidth = 2f
+                            )
+                            return@onDrawBehind
+                        }
+
+                        fun mapX(elapsedMs: Long): Float {
+                            val age = latestElapsedMs - elapsedMs
+                            return (w - (age.toFloat() / SPEED_CHART_WINDOW_MS.toFloat()) * w)
+                                .coerceIn(0f, w)
+                        }
+
+                        fun mapY(bytesPerSec: Double): Float {
+                            val fraction = (bytesPerSec / axisMaxBytesPerSec).coerceIn(0.0, 1.0)
+                            return h - fraction.toFloat() * h
+                        }
+
+                        // Skip samples that have scrolled out of the fixed time window.
+                        var first = 0
+                        while (first < samples.lastIndex &&
+                            latestElapsedMs - samples[first].elapsedMs > SPEED_CHART_WINDOW_MS
+                        ) {
+                            first++
+                        }
+
+                        linePath.reset()
+                        areaPath.reset()
+                        val firstX = mapX(samples[first].elapsedMs)
+                        val firstY = mapY(samples[first].bytesPerSec)
+                        linePath.moveTo(firstX, firstY)
+                        areaPath.moveTo(firstX, h)
+                        areaPath.lineTo(firstX, firstY)
+
+                        var prevX = firstX
+                        var prevY = firstY
+                        for (i in first + 1..samples.lastIndex) {
+                            val sample = samples[i]
+                            val x = mapX(sample.elapsedMs)
+                            val y = mapY(sample.bytesPerSec)
+                            val midX = (prevX + x) * 0.5f
+                            linePath.cubicTo(midX, prevY, midX, y, x, y)
+                            areaPath.cubicTo(midX, prevY, midX, y, x, y)
+                            prevX = x
+                            prevY = y
+                        }
+
+                        // A single sample is drawn as a short flat segment at the current level.
+                        if (samples.size == 1) {
+                            val startX = (prevX - 6.dp.toPx()).coerceIn(0f, w)
+                            linePath.reset()
+                            linePath.moveTo(startX, prevY)
+                            linePath.lineTo(prevX, prevY)
+                            areaPath.reset()
+                            areaPath.moveTo(startX, h)
+                            areaPath.lineTo(startX, prevY)
+                            areaPath.lineTo(prevX, prevY)
+                        }
+
+                        areaPath.lineTo(prevX, h)
+                        areaPath.close()
+
+                        drawPath(path = areaPath, brush = areaBrush)
+                        drawPath(path = linePath, color = glowColor, style = glowStroke)
+                        drawPath(path = linePath, brush = lineBrush, style = lineStroke)
+                        drawCircle(color = glowColor, radius = dotOuterRadius, center = Offset(prevX, prevY))
+                        drawCircle(color = endpointColor, radius = dotInnerRadius, center = Offset(prevX, prevY))
+                        drawCircle(
+                            color = GlassTextWhite,
+                            radius = dotInnerRadius * 0.45f,
+                            center = Offset(prevX, prevY)
+                        )
+                    }
+                }
+        )
+
+        // Readable speed-axis labels (MB/s)
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxHeight()
+                .padding(top = 2.dp, bottom = 14.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = axisLabel(axisMaxMbps),
+                fontSize = 9.sp,
+                lineHeight = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = appColors.textSecondary
+            )
+            Text(
+                text = axisLabel(axisMaxMbps / 2.0),
+                fontSize = 9.sp,
+                lineHeight = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = appColors.textSecondary
+            )
+            Text(
+                text = "0",
+                fontSize = 9.sp,
+                lineHeight = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = appColors.textSecondary
+            )
+        }
+
+        // Fixed time window labels
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(start = 36.dp, end = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "-20s",
+                fontSize = 10.sp,
+                lineHeight = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = appColors.textSecondary
+            )
+            Text(
+                text = if (live) "now" else "held",
+                fontSize = 10.sp,
+                lineHeight = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = appColors.textSecondary
+            )
+        }
+    }
+}
+
+private fun niceAxisMaximum(value: Double): Double {
+    if (!value.isFinite() || value <= 1.0) return 1.0
+    val magnitude = 10.0.pow(floor(log10(value)))
+    return when (val normalized = value / magnitude) {
+        in 0.0..1.0 -> magnitude
+        in 1.0..2.0 -> 2.0 * magnitude
+        in 2.0..5.0 -> 5.0 * magnitude
+        else -> 10.0 * magnitude
+    }
+}
+
+private fun axisLabel(megaBytesPerSecond: Double): String =
+    if (megaBytesPerSecond >= 10.0) {
+        megaBytesPerSecond.roundToInt().toString()
+    } else {
+        String.format(Locale.US, "%.1f", megaBytesPerSecond)
+    }
+
+@Composable
+private fun TelemetryMetric(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    horizontalAlignment: Alignment.Horizontal = Alignment.Start
+) {
+    val appColors = LocalAppColors.current
+    Column(
+        modifier = modifier,
+        horizontalAlignment = horizontalAlignment
+    ) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = appColors.textSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
         Text(
             text = value,
             style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            color = appColors.textPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun IsoSummaryCard(
-    iso: SelectedIsoInfo?,
-    isAnalyzing: Boolean,
-    isoError: String?
-) {
-    Card(
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Album,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Source ISO / Disk Image",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                if (iso != null) {
-                    StatusPill(
-                        text = if (iso.isAccessible) "VERIFIED" else "INACCESSIBLE",
-                        color = if (iso.isAccessible) statusSuccessColor() else MaterialTheme.colorScheme.error
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            when {
-                isAnalyzing -> {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.5.dp)
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = "Inspecting MBR, GPT, ISO-9660, UDF & boot headers...",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                isoError != null -> {
-                    Text(
-                        text = isoError,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-
-                iso == null -> {
-                    Text(
-                        text = "No image selected. Tap SELECT ISO to choose a Windows or Linux .iso / .img file from internal storage.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                else -> {
-                    Text(
-                        text = iso.displayName,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Size: ${ByteUtils.formatBytes(iso.sizeBytes)} (${iso.sizeBytes} bytes) • Label: ${iso.volumeLabel}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        if (iso.bootSupport.uefiSupported) {
-                            StatusPill(text = "UEFI", color = statusSuccessColor())
-                        }
-                        if (iso.bootSupport.legacyBiosSupported) {
-                            StatusPill(text = "LEGACY BIOS", color = statusSuccessColor())
-                        }
-                        if (iso.bootSupport.secureBootFriendly) {
-                            StatusPill(text = "SECURE BOOT OK", color = MaterialTheme.colorScheme.tertiary)
-                        }
-                        if (!iso.bootSupport.isGuaranteedBootable) {
-                            StatusPill(text = "NOT GUARANTEED BOOTABLE", color = statusWarningColor())
-                        }
-                        if (iso.hasUdf) {
-                            StatusPill(text = "UDF", color = MaterialTheme.colorScheme.secondary)
-                        }
-                        if (iso.hasIso9660) {
-                            StatusPill(text = "ISO-9660", color = MaterialTheme.colorScheme.secondary)
-                        }
-                        if (iso.hasGpt) {
-                            StatusPill(text = "GPT", color = MaterialTheme.colorScheme.secondary)
-                        }
-                        if (iso.hasMbr) {
-                            StatusPill(text = "MBR", color = MaterialTheme.colorScheme.secondary)
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = iso.bootSupport.headline,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = if (iso.bootSupport.isGuaranteedBootable) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            statusWarningColor()
-                        }
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = iso.bootSupport.technicalExplanation,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    if (iso.warnings.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Surface(
-                            color = statusWarningColor().copy(alpha = 0.12f),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                iso.warnings.forEach { warn ->
-                                    Row(verticalAlignment = Alignment.Top) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.WarningAmber,
-                                            contentDescription = null,
-                                            tint = statusWarningColor(),
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = warn,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun UsbDriveSummaryCard(
-    drive: UsbDriveInfo?,
-    totalDetected: Int,
-    onGrantPermission: (Int) -> Unit,
-    onRetryProbe: (Int) -> Unit
-) {
-    Card(
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Usb,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Target USB OTG Drive",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                val badgeText = when {
-                    drive == null && totalDetected == 0 -> "DISCONNECTED"
-                    drive == null -> "$totalDetected DETECTED"
-                    !drive.hasPermission -> "PERMISSION NEEDED"
-                    drive.isWriteProtected -> "READ-ONLY"
-                    drive.isProbed -> "READY"
-                    else -> "PROBING"
-                }
-                val badgeColor = when {
-                    drive == null -> MaterialTheme.colorScheme.onSurfaceVariant
-                    !drive.hasPermission -> statusWarningColor()
-                    drive.isWriteProtected || drive.probeError != null -> MaterialTheme.colorScheme.error
-                    drive.isProbed -> statusSuccessColor()
-                    else -> MaterialTheme.colorScheme.primary
-                }
-                StatusPill(text = badgeText, color = badgeColor)
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            if (drive == null) {
-                Text(
-                    text = if (totalDetected > 0) {
-                        "$totalDetected USB storage drive(s) detected. Tap SELECT USB DRIVE to choose your target."
-                    } else {
-                        "No USB flash drive connected. Plug in a USB drive through an OTG adapter, then tap SELECT USB DRIVE."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                Text(
-                    text = drive.displayName,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "VID:PID ${drive.vidPidHex} • Path: ${drive.deviceName}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-
-                when {
-                    drive.transportSupport == UsbTransportSupport.UNSUPPORTED_UASP_ONLY -> {
-                        Text(
-                            text = "Incompatible USB protocol: UASP-only device (no Bulk-Only Transport fallback).",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-
-                    !drive.hasPermission -> {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                text = "Grant Android USB Host permission to probe real capacity.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = statusWarningColor(),
-                                modifier = Modifier.weight(1f)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            TextButton(onClick = { onGrantPermission(drive.deviceId) }) {
-                                Text("GRANT")
-                            }
-                        }
-                    }
-
-                    drive.probeError != null -> {
-                        Text(
-                            text = drive.probeError,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                        TextButton(onClick = { onRetryProbe(drive.deviceId) }) {
-                            Text("RETRY SCSI PROBE")
-                        }
-                    }
-
-                    !drive.isProbed -> {
-                        Text(
-                            text = "Reading SCSI INQUIRY & READ CAPACITY...",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-
-                    else -> {
-                        Text(
-                            text = "Capacity: ${ByteUtils.formatDecimalCapacity(drive.capacityBytes)} • ${drive.logicalBlockSize}-byte sectors (${drive.totalBlocks} LBAs)",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        if (drive.isWriteProtected) {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Lock,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Drive is write-protected (read-only).",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
 @Composable
 internal fun StatusPill(text: String, color: Color) {
+    val appColors = LocalAppColors.current
+    val pillBg = if (appColors.isDark) color.copy(alpha = 0.22f) else color.copy(alpha = 0.14f)
+    val pillBorder = if (appColors.isDark) color.copy(alpha = 0.55f) else color.copy(alpha = 0.40f)
+    val pillText = if (appColors.isDark) GlassTextWhite else lerp(color, appColors.textPrimary, 0.35f)
     Surface(
-        color = color.copy(alpha = 0.14f),
-        shape = RoundedCornerShape(8.dp)
+        color = pillBg,
+        shape = PillShape,
+        border = BorderStroke(0.75.dp, pillBorder)
     ) {
         Text(
             text = text,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
-            color = color,
+            color = pillText,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
         )
     }

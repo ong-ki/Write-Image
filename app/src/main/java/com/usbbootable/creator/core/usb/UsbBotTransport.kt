@@ -21,7 +21,6 @@ data class BotCommandResult(
 ) {
     val isSuccess: Boolean get() = status == UsbBotTransport.CSW_STATUS_PASSED
     val isCommandFailed: Boolean get() = status == UsbBotTransport.CSW_STATUS_FAILED
-    val isPhaseError: Boolean get() = status == UsbBotTransport.CSW_STATUS_PHASE_ERROR
 }
 
 data class BotResetRecoveryStatus(
@@ -29,9 +28,6 @@ data class BotResetRecoveryStatus(
     val clearInResult: Int,
     val clearOutResult: Int
 ) {
-    val isClean: Boolean
-        get() = resetResult >= 0 && clearInResult >= 0 && clearOutResult >= 0
-
     fun describe(): String =
         "BOT Reset Recovery [reset=$resetResult, clearIn=$clearInResult, clearOut=$clearOutResult]"
 }
@@ -245,6 +241,16 @@ class UsbBotTransport(
         )
     }
 
+    private fun cancelAfterCbwIfConnected(message: String): Nothing {
+        if (io.isConnected()) {
+            try {
+                resetRecovery()
+            } catch (_: Exception) {
+            }
+        }
+        throw CancellationException(message)
+    }
+
     @Throws(UsbStorageException::class, CancellationException::class)
     fun executeCommand(
         lun: Int,
@@ -253,7 +259,7 @@ class UsbBotTransport(
         dataBuffer: ByteArray? = null,
         dataOffset: Int = 0,
         dataLength: Int = 0,
-        commandName: String = formatCdbName(cdb),
+        commandName: String = "SCSI_OP",
         timeoutMs: Int = transferTimeoutMs
     ): BotCommandResult = synchronized(transportLock) {
         if (isCancelled()) throw CancellationException("USB transfer cancelled before command dispatch.")
@@ -302,10 +308,11 @@ class UsbBotTransport(
             var remaining = dataLength
             var pos = dataOffset
             val maxChunk = io.maxBulkChunkBytes.coerceAtLeast(512)
+            val maxInPkt = io.bulkInMaxPacketSize.coerceAtLeast(1)
 
             while (remaining > 0) {
                 if (isCancelled()) {
-                    throw CancellationException("USB transfer cancelled mid-data-phase.")
+                    cancelAfterCbwIfConnected("USB transfer cancelled mid-data-phase.")
                 }
                 if (!io.isConnected()) throw UsbDisconnectedException()
                 val chunk = minOf(remaining, maxChunk)
@@ -315,7 +322,7 @@ class UsbBotTransport(
                     BotDirection.NONE -> 0
                 }
                 if (isCancelled()) {
-                    throw CancellationException("USB transfer cancelled after data chunk.")
+                    cancelAfterCbwIfConnected("USB transfer cancelled after data chunk.")
                 }
                 if (xfer < 0) {
                     if (!io.isConnected()) throw UsbDisconnectedException()
@@ -343,22 +350,21 @@ class UsbBotTransport(
                 pos += xfer
                 remaining -= xfer
 
-                // IMPORTANT: Only Device-to-Host (IN) transfers terminate early on a short packet.
-                // For Host-to-Device (OUT) transfers, if usbdevfs accepted a partial slice (0 < xfer < chunk),
-                // we MUST continue transmitting the remaining bytes promised in dCBWDataTransferLength!
-                if (direction == BotDirection.IN && xfer < chunk) {
+                // Only terminate Device-to-Host (IN) early on a true USB short packet
+                // (not on partial multi-packet URBs where xfer is an exact multiple of wMaxPacketSize).
+                if (direction == BotDirection.IN && xfer < chunk && (xfer % maxInPkt != 0)) {
                     break
                 }
             }
         }
 
         // 3. Status Transport (CSW - 13 bytes)
-        if (isCancelled()) throw CancellationException("USB transfer cancelled before CSW.")
+        if (isCancelled()) cancelAfterCbwIfConnected("USB transfer cancelled before CSW.")
         val cswTimeout = if (direction == BotDirection.OUT) maxOf(timeoutMs, WRITE_CSW_TIMEOUT_MS) else timeoutMs
         var cswRead = readCswPacket(cswTimeout)
 
         if (cswRead != CSW_SIZE) {
-            if (isCancelled()) throw CancellationException("USB transfer cancelled during CSW.")
+            if (isCancelled()) cancelAfterCbwIfConnected("USB transfer cancelled during CSW.")
             if (!io.isConnected()) throw UsbDisconnectedException()
 
             // Per BOT 1.0 §5.3.3 Figure 2: clear Bulk-IN halt once, settle, and re-read CSW.
@@ -373,7 +379,7 @@ class UsbBotTransport(
             cswRead = readCswPacket(cswTimeout)
 
             if (cswRead != CSW_SIZE) {
-                if (isCancelled()) throw CancellationException("USB transfer cancelled during CSW retry.")
+                if (isCancelled()) cancelAfterCbwIfConnected("USB transfer cancelled during CSW retry.")
                 if (!io.isConnected()) throw UsbDisconnectedException()
                 val rec = resetRecovery()
                 val errCode = if (dataPhaseError && lastDataErrorCode != 0) lastDataErrorCode else cswRead
@@ -404,6 +410,24 @@ class UsbBotTransport(
                     parsed.tag,
                     tag,
                     rec.describe()
+                ),
+                resetPerformed = true
+            )
+        }
+
+        if (parsed.status !in CSW_STATUS_PASSED..CSW_STATUS_PHASE_ERROR ||
+            parsed.dataResidue < 0 ||
+            parsed.dataResidue > dataLength
+        ) {
+            val rec = resetRecovery()
+            throw UsbBotCommandException(
+                commandName = commandName,
+                endpointInfo = io.endpointSummary(),
+                transferredBytes = totalTransferred,
+                expectedBytes = dataLength,
+                usbErrorCode = parsed.status,
+                recoveryStatus = "Non-meaningful CSW (status=0x%02X, residue=${parsed.dataResidue}/$dataLength); ${rec.describe()}".format(
+                    parsed.status
                 ),
                 resetPerformed = true
             )
@@ -487,25 +511,6 @@ class UsbBotTransport(
         const val WRITE_CSW_TIMEOUT_MS = 15_000
         private const val RESET_SETTLE_DELAY_MS = 80L
         private const val HALT_CLEAR_DELAY_MS = 25L
-
-        fun formatCdbName(cdb: ByteArray): String {
-            if (cdb.isEmpty()) return "SCSI[]"
-            val op = cdb[0].toInt() and 0xFF
-            return when (op.toByte()) {
-                ScsiCommandSet.OP_TEST_UNIT_READY -> "TEST_UNIT_READY(0x00)"
-                ScsiCommandSet.OP_REQUEST_SENSE -> "REQUEST_SENSE(0x03)"
-                ScsiCommandSet.OP_INQUIRY -> "INQUIRY(0x12)"
-                ScsiCommandSet.OP_MODE_SENSE_6 -> "MODE_SENSE_6(0x1A)"
-                ScsiCommandSet.OP_READ_CAPACITY_10 -> "READ_CAPACITY_10(0x25)"
-                ScsiCommandSet.OP_READ_10 -> "READ_10(0x28)"
-                ScsiCommandSet.OP_WRITE_10 -> "WRITE_10(0x2A)"
-                ScsiCommandSet.OP_SYNCHRONIZE_CACHE_10 -> "SYNCHRONIZE_CACHE_10(0x35)"
-                ScsiCommandSet.OP_READ_16 -> "READ_16(0x88)"
-                ScsiCommandSet.OP_WRITE_16 -> "WRITE_16(0x8A)"
-                ScsiCommandSet.OP_SERVICE_ACTION_IN_16 -> "READ_CAPACITY_16(0x9E)"
-                else -> "SCSI_OP(0x%02X)".format(op)
-            }
-        }
 
         fun encodeCbw(
             out: ByteArray,

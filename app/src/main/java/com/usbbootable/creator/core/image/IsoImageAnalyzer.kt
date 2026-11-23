@@ -11,9 +11,10 @@ object IsoImageAnalyzer {
 
     const val FAT32_MAX_FILE_SIZE: Long = 4_294_967_295L // 4 GiB - 1 byte
 
-    fun openFileSystem(source: ImageSource): ImageFileSystem? {
+    fun openFileSystem(source: ImageSource, hasUdfHint: Boolean? = null): ImageFileSystem? {
         // Prefer UDF when present (Windows 10/11 ISOs put real files in UDF and only a stub README in ISO-9660)
-        if (UdfReader.hasUdfSignature(source)) {
+        val hasUdf = hasUdfHint ?: UdfReader.hasUdfSignature(source)
+        if (hasUdf) {
             val udf = UdfReader.tryParse(source)
             if (udf != null && udf.entries.isNotEmpty()) return udf
         }
@@ -100,7 +101,7 @@ object IsoImageAnalyzer {
         val isRawBootableHybrid = (hasMbrSignature && hasValidMbrPartition) || hasGpt
         var fs: ImageFileSystem? = null
         if (hasUdf || hasIso9660) {
-            fs = openFileSystem(source)
+            fs = openFileSystem(source, hasUdfHint = hasUdf)
         }
 
         val allFiles = fs?.entries?.filter { !it.isDirectory }.orEmpty()

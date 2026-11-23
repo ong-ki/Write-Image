@@ -43,6 +43,9 @@ class RawImageWriter(
         onProgress: (WriteProgress) -> Unit
     ): VerificationReport {
         val totalBytes = source.sizeBytes
+        if (totalBytes <= 0L) {
+            throw IOException("Selected image is empty (0 bytes).")
+        }
         val blockSize = device.blockSize
         val requiredBlocks = (totalBytes + blockSize - 1L) / blockSize.toLong()
         if (requiredBlocks > device.totalBlocks) {
@@ -104,6 +107,7 @@ class RawImageWriter(
 
             val readerJob = launch(Dispatchers.IO) {
                 var offset = 0L
+                var failure: Throwable? = null
                 try {
                     while (offset < totalBytes) {
                         checkState(isCancelled, isDisconnected)
@@ -120,14 +124,17 @@ class RawImageWriter(
                         offset += toRead
                         readyQueue.send(IoChunk(buf, toRead, sectorsThisChunk))
                     }
+                } catch (t: Throwable) {
+                    failure = t
+                    throw t
                 } finally {
-                    readyQueue.close()
+                    readyQueue.close(failure)
                 }
             }
 
             try {
                 var currentLba = 0L
-                var lastEmitNanos = 0L
+                var lastEmitNanos = System.nanoTime() - PROGRESS_INTERVAL_NANOS
                 for (chunk in readyQueue) {
                     checkState(isCancelled, isDisconnected)
                     device.writeBlocks(currentLba, chunk.sectorCount, chunk.buffer, 0)
@@ -144,6 +151,7 @@ class RawImageWriter(
                             WriteProgress(
                                 phase = WritePhase.WRITING,
                                 bytesProcessed = bytesWritten,
+                                bytesWritten = bytesWritten,
                                 totalBytes = totalBytes,
                                 phaseProgress = phaseFrac,
                                 overallProgress = 0.02f + phaseFrac * writeWeight,
@@ -181,7 +189,8 @@ class RawImageWriter(
         onProgress(
             WriteProgress(
                 phase = WritePhase.FLUSHING_CACHE,
-                bytesProcessed = totalBytes,
+                bytesProcessed = bytesWritten,
+                bytesWritten = bytesWritten,
                 totalBytes = totalBytes,
                 phaseProgress = 1f,
                 overallProgress = if (verifyAfterWrite) 0.71f else 0.98f,
@@ -214,6 +223,7 @@ class RawImageWriter(
             WriteProgress(
                 phase = WritePhase.VERIFYING,
                 bytesProcessed = 0L,
+                bytesWritten = bytesWritten,
                 totalBytes = totalBytes,
                 phaseProgress = 0f,
                 overallProgress = 0.72f,
@@ -233,6 +243,7 @@ class RawImageWriter(
             val usbReaderJob = launch(Dispatchers.IO) {
                 var readOffset = 0L
                 var readLba = 0L
+                var failure: Throwable? = null
                 try {
                     while (readOffset < totalBytes) {
                         checkState(isCancelled, isDisconnected)
@@ -244,14 +255,17 @@ class RawImageWriter(
                         readLba += sectorsToRead
                         readQueue.send(IoChunk(buf, validBytes, sectorsToRead))
                     }
+                } catch (t: Throwable) {
+                    failure = t
+                    throw t
                 } finally {
-                    readQueue.close()
+                    readQueue.close(failure)
                 }
             }
 
             try {
                 var verifiedLba = 0L
-                var lastEmitNanos = 0L
+                var lastEmitNanos = System.nanoTime() - PROGRESS_INTERVAL_NANOS
                 for (chunk in readQueue) {
                     checkState(isCancelled, isDisconnected)
                     verifyDigest.update(chunk.buffer, 0, chunk.validBytes)
@@ -268,9 +282,10 @@ class RawImageWriter(
                             WriteProgress(
                                 phase = WritePhase.VERIFYING,
                                 bytesProcessed = bytesVerified,
+                                bytesWritten = bytesWritten,
                                 totalBytes = totalBytes,
                                 phaseProgress = phaseFrac,
-                                overallProgress = 0.72f + phaseFrac * 0.28f,
+                                overallProgress = 0.72f + phaseFrac * 0.27f,
                                 speedBytesPerSec = speed,
                                 etaSeconds = eta,
                                 currentItemLabel = "Verifying LBA $verifiedLba / $requiredBlocks",
