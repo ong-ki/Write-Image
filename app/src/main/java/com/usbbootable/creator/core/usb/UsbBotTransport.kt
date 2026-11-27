@@ -6,6 +6,7 @@ import android.os.Build
 import com.usbbootable.creator.core.util.ByteUtils
 import com.usbbootable.creator.core.util.OperationLogger
 import java.util.concurrent.CancellationException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 enum class BotDirection(val cbwFlag: Byte) {
@@ -170,6 +171,10 @@ class UsbBotTransport(
     private val tagCounter = AtomicInteger(1)
     private val cbwBuffer = ByteArray(CBW_SIZE)
     private val cswBuffer = ByteArray(CSW_SIZE)
+    private val botStateBad = AtomicBoolean(false)
+
+    val isBotStateBad: Boolean
+        get() = botStateBad.get()
 
     val endpointSummary: String
         get() = io.endpointSummary()
@@ -241,6 +246,44 @@ class UsbBotTransport(
         )
     }
 
+    /**
+     * Clears ENDPOINT_HALT on both Bulk-IN and Bulk-OUT endpoints, ignoring transfer errors
+     * and returning their control-transfer status codes (or -1 on exception).
+     */
+    fun clearBothEndpointHalts(): Pair<Int, Int> = synchronized(transportLock) {
+        val inRc = try {
+            clearEndpointHalt(io.bulkInAddress)
+        } catch (_: Exception) {
+            -1
+        }
+        try {
+            sleepMs(HALT_CLEAR_DELAY_MS)
+        } catch (_: Exception) {
+        }
+        val outRc = try {
+            clearEndpointHalt(io.bulkOutAddress)
+        } catch (_: Exception) {
+            -1
+        }
+        try {
+            sleepMs(HALT_CLEAR_DELAY_MS)
+        } catch (_: Exception) {
+        }
+        Pair(inRc, outRc)
+    }
+
+    /**
+     * Executes BOT Reset Recovery when recovering a previously bad BOT state before eject.
+     * Clears [isBotStateBad] if all recovery control transfers succeed.
+     */
+    fun resetRecoveryForBadState(): BotResetRecoveryStatus = synchronized(transportLock) {
+        val status = resetRecovery()
+        if (status.resetResult >= 0 && status.clearInResult >= 0 && status.clearOutResult >= 0) {
+            botStateBad.set(false)
+        }
+        status
+    }
+
     private fun cancelAfterCbwIfConnected(message: String): Nothing {
         if (io.isConnected()) {
             try {
@@ -287,6 +330,7 @@ class UsbBotTransport(
         if (cbwSent != CBW_SIZE) {
             if (isCancelled()) throw CancellationException("USB transfer cancelled during CBW.")
             if (!io.isConnected()) throw UsbDisconnectedException()
+            botStateBad.set(true)
             val rec = resetRecovery()
             throw UsbBotCommandException(
                 commandName = "$commandName (CBW stage)",
@@ -381,6 +425,7 @@ class UsbBotTransport(
             if (cswRead != CSW_SIZE) {
                 if (isCancelled()) cancelAfterCbwIfConnected("USB transfer cancelled during CSW retry.")
                 if (!io.isConnected()) throw UsbDisconnectedException()
+                botStateBad.set(true)
                 val rec = resetRecovery()
                 val errCode = if (dataPhaseError && lastDataErrorCode != 0) lastDataErrorCode else cswRead
                 throw UsbBotCommandException(
@@ -397,6 +442,7 @@ class UsbBotTransport(
 
         val parsed = decodeCsw(cswBuffer)
         if (parsed.signature != CSW_SIGNATURE || parsed.tag != tag) {
+            botStateBad.set(true)
             val rec = resetRecovery()
             throw UsbBotCommandException(
                 commandName = commandName,
@@ -419,6 +465,7 @@ class UsbBotTransport(
             parsed.dataResidue < 0 ||
             parsed.dataResidue > dataLength
         ) {
+            botStateBad.set(true)
             val rec = resetRecovery()
             throw UsbBotCommandException(
                 commandName = commandName,
@@ -434,6 +481,7 @@ class UsbBotTransport(
         }
 
         if (parsed.status == CSW_STATUS_PHASE_ERROR) {
+            botStateBad.set(true)
             val rec = resetRecovery()
             throw UsbBotCommandException(
                 commandName = commandName,
@@ -449,6 +497,7 @@ class UsbBotTransport(
         // If Data-OUT terminated early with a transport error yet CSW claimed PASSED with 0 residue,
         // do NOT silently trust a partial write!
         if (direction == BotDirection.OUT && dataPhaseError && parsed.status == CSW_STATUS_PASSED) {
+            botStateBad.set(true)
             val rec = resetRecovery()
             throw UsbBotCommandException(
                 commandName = commandName,
@@ -461,6 +510,7 @@ class UsbBotTransport(
             )
         }
 
+        botStateBad.set(false)
         return BotCommandResult(
             status = parsed.status,
             dataResidue = parsed.dataResidue,

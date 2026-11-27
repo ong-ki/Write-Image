@@ -7,6 +7,7 @@ import android.provider.OpenableColumns
 import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.usbbootable.creator.R
 import com.usbbootable.creator.UsbBootableApp
 import com.usbbootable.creator.core.image.DetectedOsFamily
 import com.usbbootable.creator.core.image.FlashingMode
@@ -20,6 +21,7 @@ import com.usbbootable.creator.core.storage.AppearanceCustomization
 import com.usbbootable.creator.core.storage.OperationHistoryRecord
 import com.usbbootable.creator.core.storage.WriteBufferOption
 import com.usbbootable.creator.core.usb.UsbDeviceSession
+import com.usbbootable.creator.core.usb.UsbDisconnectedException
 import com.usbbootable.creator.core.usb.UsbDriveInfo
 import com.usbbootable.creator.core.usb.UsbEvent
 import com.usbbootable.creator.core.usb.UsbHealthChecker
@@ -34,7 +36,11 @@ import com.usbbootable.creator.core.writer.WindowsBypassOptions
 import com.usbbootable.creator.core.writer.WritePhase
 import com.usbbootable.creator.core.writer.WriteProgress
 import com.usbbootable.creator.service.PendingWriteJob
+import com.usbbootable.creator.service.UsbEjectPhase
+import com.usbbootable.creator.service.UsbEjectState
 import com.usbbootable.creator.service.UsbWriteService
+import com.usbbootable.creator.service.buildEjectExceptionDetailLog
+import com.usbbootable.creator.service.resolveEjectErrorMessage
 import com.usbbootable.creator.ui.theme.ThemeMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -82,6 +88,7 @@ data class DashboardUiState(
     /** True from the moment Create is confirmed, before the service publishes its first phase. */
     val operationTimerRunning: Boolean = false,
     val usbHealthProgress: UsbHealthProgress = UsbHealthProgress(),
+    val ejectState: UsbEjectState = UsbEjectState(),
     val settings: AppSettings = AppSettings(),
     val customization: AppearanceCustomization = AppearanceCustomization.DEFAULT,
     val history: List<OperationHistoryRecord> = emptyList(),
@@ -95,6 +102,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as UsbBootableApp
     private val usbMonitor = app.usbMonitor
     private val writeStore = app.writeStateStore
+    private val safeEjectStore = app.safeEjectStore
     private val prefsStore = app.preferencesStore
     private val customizationStore = app.customizationStore
     private val logger = app.logger
@@ -127,9 +135,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var isoAnalysisGeneration = 0L
     private var usbRefreshJob: Job? = null
     private var healthCheckJob: Job? = null
+    private var ejectJob: Job? = null
     private val isStartingWrite = AtomicBoolean(false)
     @Volatile
     private var activeHealthRun: ActiveHealthRun? = null
+    @Volatile
+    private var activeEjectRun: ActiveEjectRun? = null
+
+    private class ActiveEjectRun(
+        val deviceId: Int,
+        val unpluggedBeforeComplete: AtomicBoolean = AtomicBoolean(false),
+        val cancelled: AtomicBoolean = AtomicBoolean(false)
+    )
 
     private data class IsoSelectionBundle(
         val iso: SelectedIsoInfo?,
@@ -172,7 +189,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val speedSnapshot: TransferSpeedSnapshot,
         val elapsedSeconds: Long,
         val timerRunning: Boolean,
-        val healthProgress: UsbHealthProgress
+        val healthProgress: UsbHealthProgress,
+        val ejectState: UsbEjectState = UsbEjectState()
     )
 
     // Exposed separately so diagnostic log appends never trigger Home screen recompositions
@@ -191,7 +209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         .distinctUntilChanged()
 
-    private val progressBundleFlow = combine(
+    private val coreProgressBundleFlow = combine(
         writeStore.progress,
         writeStore.speedSnapshot,
         elapsedSecondsFlow,
@@ -199,6 +217,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         usbHealthProgressFlow
     ) { progress, speed, elapsed, timer, health ->
         ProgressWithTimer(progress, speed, elapsed, timer.isRunning, health)
+    }
+
+    private val progressBundleFlow = combine(
+        coreProgressBundleFlow,
+        safeEjectStore.state
+    ) { bundle, eject ->
+        bundle.copy(ejectState = eject)
     }
 
     private val customizationFlow: StateFlow<AppearanceCustomization> = customizationStore.customization
@@ -212,7 +237,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         customizationFlow
     ) { isoBundle, drives, progressBundle, meta, customization ->
         val selectedDrive = meta.selectedDriveId?.let { id ->
-            drives.firstOrNull { it.deviceId == id }
+            if (usbMonitor.isDeviceEjected(id)) null else drives.firstOrNull { it.deviceId == id }
         }
         val preflight = PreflightValidator.validate(
             isUsbHostSupported = usbMonitor.isUsbHostSupported,
@@ -236,6 +261,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             elapsedSeconds = progressBundle.elapsedSeconds,
             operationTimerRunning = progressBundle.timerRunning,
             usbHealthProgress = progressBundle.healthProgress,
+            ejectState = progressBundle.ejectState,
             settings = meta.settings,
             customization = customization,
             history = meta.history,
@@ -254,7 +280,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         runStartupInitialization()
         observeUsbEvents()
+        observeEjectCompletions()
         monitorTransferSpeed()
+    }
+
+    private fun observeEjectCompletions() {
+        viewModelScope.launch {
+            safeEjectStore.state.collect { eject ->
+                if (eject.isEjectedOrWarning && eject.targetDeviceId != null) {
+                    if (selectedDriveIdFlow.value == eject.targetDeviceId) {
+                        selectedDriveIdFlow.value = null
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -298,8 +337,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     is UsbEvent.DeviceAttached -> {
                         val drive = usbMonitor.drives.value.firstOrNull { it.deviceId == event.deviceId }
                             ?: return@collect
+                        if (!safeEjectStore.state.value.isEjecting) {
+                            safeEjectStore.reset()
+                        }
                         bannerMessageFlow.value = "USB OTG device connected: ${event.name}"
-                        if (selectedDriveIdFlow.value == null) {
+                        if (selectedDriveIdFlow.value == null && !usbMonitor.isDeviceEjected(event.deviceId)) {
                             selectedDriveIdFlow.value = event.deviceId
                             if (drive.transportSupport == UsbTransportSupport.SUPPORTED_BOT && !drive.hasPermission) {
                                 usbMonitor.requestPermission(event.deviceId)
@@ -316,6 +358,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             bannerMessageFlow.value =
                                 "USB Host permission was denied. Tap SELECT USB DRIVE to grant permission."
                         } else if (usbMonitor.drives.value.any { it.deviceId == event.deviceId }) {
+                            usbMonitor.clearEjectedMarker(event.deviceId)
+                            if (!safeEjectStore.state.value.isEjecting) {
+                                safeEjectStore.reset()
+                            }
                             selectedDriveIdFlow.value = event.deviceId
                         }
                     }
@@ -326,6 +372,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun handleUsbDisconnected(disconnectedDeviceId: Int?) {
         val drivesEmpty = usbMonitor.drives.value.isEmpty()
+        val currentEject = safeEjectStore.state.value
+        val currentEjectRun = activeEjectRun
+        val wasEjectingTarget = (currentEject.isEjecting &&
+            (disconnectedDeviceId == null ||
+                currentEject.targetDeviceId == disconnectedDeviceId ||
+                drivesEmpty)) ||
+            (disconnectedDeviceId != null && currentEjectRun?.deviceId == disconnectedDeviceId)
+        val wasFailedEjectTarget = currentEject.phase == UsbEjectPhase.FAILED &&
+            (disconnectedDeviceId == null ||
+                currentEject.targetDeviceId == disconnectedDeviceId ||
+                drivesEmpty)
+        val wasAlreadySafelyEjected = (disconnectedDeviceId != null &&
+            usbMonitor.consumeEjectedMarker(disconnectedDeviceId)) ||
+            (currentEject.isEjectedOrWarning &&
+                disconnectedDeviceId != null &&
+                currentEject.targetDeviceId == disconnectedDeviceId)
+
         val wasSelected = disconnectedDeviceId != null && selectedDriveIdFlow.value == disconnectedDeviceId
         val wasActiveWriteTarget = disconnectedDeviceId != null &&
             writeStore.pendingJob?.driveInfo?.deviceId == disconnectedDeviceId
@@ -333,8 +396,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val wasActiveHealthTarget = disconnectedDeviceId != null &&
             currentHealthRun?.deviceId == disconnectedDeviceId
 
-        if (wasSelected || drivesEmpty) {
+        if (wasSelected || (drivesEmpty && !wasAlreadySafelyEjected)) {
             selectedDriveIdFlow.value = null
+        }
+
+        if (wasEjectingTarget || wasFailedEjectTarget) {
+            currentEjectRun?.unpluggedBeforeComplete?.set(true)
+            bannerMessageFlow.value = null
+            val targetId = currentEject.targetDeviceId ?: disconnectedDeviceId
+            safeEjectStore.markDisconnectedWarning(
+                deviceId = targetId,
+                deviceName = currentEject.targetDeviceName,
+                warningMessage = app.getString(R.string.eject_banner_unplugged_warning)
+            )
+            if (writeStore.progress.value.phase != WritePhase.IDLE && !writeStore.progress.value.phase.isActive) {
+                writeStore.resetForDisconnect(wasActiveWrite = false)
+            }
+            logger.warn(TAG, "USB drive was unplugged before safe eject completed (deviceId=$targetId)")
+            return
+        }
+
+        if (wasAlreadySafelyEjected) {
+            logger.info(TAG, "Safely ejected USB drive physically removed (deviceId=$disconnectedDeviceId)")
+            return
         }
 
         // Clear temporary USB connection / permission / status banners immediately
@@ -351,8 +435,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             UsbWriteService.cancelWrite(app)
             writeStore.resetForDisconnect(wasActiveWrite = isWriteActive || writeStore.pendingJob != null)
             if (isWriteActive) {
-                bannerMessageFlow.value =
-                    "USB drive disconnected. The write was aborted; the drive may contain partial data."
+                bannerMessageFlow.value = app.getString(R.string.usb_disconnected_during_write)
             }
         } else if (writeStore.progress.value.phase != WritePhase.IDLE && (wasSelected || drivesEmpty)) {
             writeStore.resetForDisconnect(wasActiveWrite = false)
@@ -435,8 +518,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectUsbDrive(deviceId: Int) {
-        if (writeStore.progress.value.phase.isActive) return
+        if (writeStore.progress.value.phase.isActive || safeEjectStore.state.value.isEjecting) return
         val drive = usbMonitor.drives.value.firstOrNull { it.deviceId == deviceId } ?: return
+        usbMonitor.clearEjectedMarker(deviceId)
+        safeEjectStore.reset()
         selectedDriveIdFlow.value = deviceId
         if (drive.transportSupport == UsbTransportSupport.SUPPORTED_BOT) {
             if (!drive.hasPermission) {
@@ -477,8 +562,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 handleUsbDisconnected(currentId)
             } else if (selectDeviceId != null && drives.any { it.deviceId == selectDeviceId }) {
                 selectUsbDrive(selectDeviceId)
-            } else if (selectedDriveIdFlow.value == null && drives.size == 1) {
-                selectedDriveIdFlow.value = drives.first().deviceId
+            } else if (selectedDriveIdFlow.value == null) {
+                val eligible = drives.filterNot { usbMonitor.isDeviceEjected(it.deviceId) }
+                if (drives.size == 1 && eligible.size == 1) {
+                    selectedDriveIdFlow.value = eligible.first().deviceId
+                }
             }
         }
     }
@@ -488,11 +576,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             writeStore.timerState.value.isRunning ||
             writeStore.pendingJob != null ||
             usbHealthProgressFlow.value.phase.isActive ||
-            healthCheckJob?.isActive == true
+            healthCheckJob?.isActive == true ||
+            safeEjectStore.state.value.isEjecting
         ) {
             return
         }
         if (!isStartingWrite.compareAndSet(false, true)) return
+        safeEjectStore.reset()
         if (!uiState.value.flashingModeSelected) {
             isStartingWrite.set(false)
             bannerMessageFlow.value = "Select a flashing mode before creating the bootable USB."
@@ -574,6 +664,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     driveInfo = liveDrive,
                     requestedBufferBytes = currentSettings.bufferOption.bytesOrAuto,
                     verifyAfterWrite = currentSettings.verifyAfterWrite,
+                    autoEjectAfterWrite = currentSettings.autoEjectAfterWrite,
                     windowsBypassOptions = effectiveBypass
                 )
                 selectedTabFlow.value = AppTab.HOME
@@ -614,10 +705,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             writeStore.pendingJob != null ||
             isStartingWrite.get() ||
             usbHealthProgressFlow.value.phase.isActive ||
-            healthCheckJob?.isActive == true
+            healthCheckJob?.isActive == true ||
+            safeEjectStore.state.value.isEjecting
         ) {
             return
         }
+        safeEjectStore.reset()
         val drive = uiState.value.selectedDrive ?: return
         if (drive.transportSupport != UsbTransportSupport.SUPPORTED_BOT || !drive.hasPermission) {
             bannerMessageFlow.value = "Grant USB permission for ${drive.displayName} before running a health check."
@@ -819,9 +912,218 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun ejectSelectedUsb() {
+        if (isUsbOperationBusy()) {
+            if (writeStore.progress.value.phase.isActive || writeStore.pendingJob != null || isStartingWrite.get()) {
+                logger.warn(TAG, "Ignoring safe eject request while USB write is active.")
+            }
+            return
+        }
+        val drive = uiState.value.selectedDrive
+        if (drive == null) {
+            safeEjectStore.markFailed(null, "", app.getString(R.string.eject_error_no_drive))
+            return
+        }
+        launchEject(drive)
+    }
+
+    fun retryEjectUsb() {
+        if (isUsbOperationBusy()) return
+        val eject = safeEjectStore.state.value
+        val drive = uiState.value.selectedDrive
+            ?: eject.targetDeviceId?.let { id -> usbMonitor.drives.value.firstOrNull { it.deviceId == id } }
+        if (drive == null) {
+            safeEjectStore.markFailed(
+                eject.targetDeviceId,
+                eject.targetDeviceName,
+                app.getString(R.string.eject_error_no_drive)
+            )
+            return
+        }
+        launchEject(drive)
+    }
+
+    fun dismissEjectBanner() {
+        if (!safeEjectStore.state.value.isEjecting) {
+            safeEjectStore.reset()
+        }
+    }
+
+    private fun isUsbOperationBusy(): Boolean =
+        writeStore.progress.value.phase.isActive ||
+            writeStore.pendingJob != null ||
+            isStartingWrite.get() ||
+            writeStore.timerState.value.isRunning ||
+            usbHealthProgressFlow.value.phase.isActive ||
+            healthCheckJob?.isActive == true ||
+            safeEjectStore.state.value.isEjecting
+
+    private fun launchEject(drive: UsbDriveInfo) {
+        if (drive.transportSupport != UsbTransportSupport.SUPPORTED_BOT) {
+            val msg = app.getString(R.string.eject_error_unsupported_transport)
+            logger.error(TAG, "Safe eject failed for '${drive.displayName}': unsupported transport (${drive.transportSupport})")
+            safeEjectStore.markFailed(
+                drive.deviceId,
+                drive.displayName,
+                msg,
+                detailLog = "Device '${drive.displayName}' transportSupport=${drive.transportSupport} (BOT 0x50 required)."
+            )
+            return
+        }
+        if (!drive.hasPermission) {
+            val msg = app.getString(R.string.eject_error_no_permission)
+            logger.error(TAG, "Safe eject failed for '${drive.displayName}': USB permission not granted")
+            safeEjectStore.markFailed(
+                drive.deviceId,
+                drive.displayName,
+                msg,
+                detailLog = "USB permission was not granted for '${drive.displayName}' (VID:PID ${drive.vidPidHex})."
+            )
+            return
+        }
+
+        val run = ActiveEjectRun(deviceId = drive.deviceId)
+        activeEjectRun = run
+        bannerMessageFlow.value = null
+        safeEjectStore.beginEject(drive.deviceId, drive.displayName)
+
+        ejectJob = viewModelScope.launch {
+            val disconnectWatcher = launch {
+                usbMonitor.events.collect { event ->
+                    if (event is UsbEvent.DeviceDetached && event.deviceId == drive.deviceId) {
+                        run.unpluggedBeforeComplete.set(true)
+                    }
+                }
+            }
+            usbMonitor.setEjectActive(true)
+            try {
+                // Allow a brief initial probe to finish cleanly before claiming the BOT interface.
+                var waitedMs = 0L
+                while (usbMonitor.isProbeInFlight(drive.deviceId) && waitedMs < 2_000L) {
+                    if (run.unpluggedBeforeComplete.get() || !usbMonitor.isDeviceConnected(drive.deviceId)) {
+                        throw UsbDisconnectedException()
+                    }
+                    delay(50L)
+                    waitedMs += 50L
+                }
+                val usbDevice = usbMonitor.getUsbDevice(drive.deviceId)
+                    ?: throw UsbDisconnectedException()
+                if (run.unpluggedBeforeComplete.get() || !usbMonitor.isDeviceConnected(drive.deviceId)) {
+                    throw UsbDisconnectedException()
+                }
+
+                val result = withContext(Dispatchers.IO) {
+                    UsbDeviceSession.eject(
+                        usbManager = usbMonitor.usbManager,
+                        device = usbDevice,
+                        lun = drive.lun,
+                        isDisconnected = {
+                            run.unpluggedBeforeComplete.get() || !usbMonitor.isDeviceConnected(drive.deviceId)
+                        },
+                        isCancelled = { run.cancelled.get() },
+                        logger = logger
+                    )
+                }
+
+                if (run.unpluggedBeforeComplete.get() || !usbMonitor.isDeviceConnected(drive.deviceId)) {
+                    throw UsbDisconnectedException()
+                }
+                val failureSummary = result.formatFailingHistoryNote()
+                if (failureSummary != null && writeStore.progress.value.phase == WritePhase.COMPLETED) {
+                    prefsStore.appendSummaryNoteToLatestCompletedWrite(
+                        drive.displayName,
+                        "Eject diagnostics: $failureSummary"
+                    )
+                }
+                usbMonitor.markDeviceEjected(drive.deviceId)
+                if (selectedDriveIdFlow.value == drive.deviceId) {
+                    selectedDriveIdFlow.value = null
+                }
+                if (result.allCommandsFailed) {
+                    safeEjectStore.markCompletedWithWarning(
+                        drive.deviceId,
+                        drive.displayName,
+                        app.getString(R.string.eject_banner_all_commands_failed_warning),
+                        detailLog = result.logText
+                    )
+                    logger.warn(
+                        TAG,
+                        "Safe eject completed with warnings for '${drive.displayName}': ${failureSummary ?: "all commands failed"}"
+                    )
+                } else {
+                    safeEjectStore.markSucceeded(
+                        drive.deviceId,
+                        drive.displayName,
+                        detailLog = if (failureSummary != null) result.logText else null
+                    )
+                    logger.success(TAG, "USB drive '${drive.displayName}' safely ejected. Safe to remove.")
+                }
+            } catch (_: UsbDisconnectedException) {
+                if (selectedDriveIdFlow.value == drive.deviceId) {
+                    selectedDriveIdFlow.value = null
+                }
+                safeEjectStore.markDisconnectedWarning(
+                    drive.deviceId,
+                    drive.displayName,
+                    app.getString(R.string.eject_banner_unplugged_warning)
+                )
+                logger.warn(TAG, "USB drive '${drive.displayName}' was unplugged before eject completed.")
+            } catch (e: CancellationException) {
+                if (run.unpluggedBeforeComplete.get()) {
+                    if (selectedDriveIdFlow.value == drive.deviceId) {
+                        selectedDriveIdFlow.value = null
+                    }
+                    safeEjectStore.markDisconnectedWarning(
+                        drive.deviceId,
+                        drive.displayName,
+                        app.getString(R.string.eject_banner_unplugged_warning)
+                    )
+                } else {
+                    throw e
+                }
+            } catch (e: Exception) {
+                if (run.unpluggedBeforeComplete.get() || !usbMonitor.isDeviceConnected(drive.deviceId)) {
+                    if (selectedDriveIdFlow.value == drive.deviceId) {
+                        selectedDriveIdFlow.value = null
+                    }
+                    safeEjectStore.markDisconnectedWarning(
+                        drive.deviceId,
+                        drive.displayName,
+                        app.getString(R.string.eject_banner_unplugged_warning)
+                    )
+                    logger.warn(TAG, "USB drive '${drive.displayName}' was unplugged before eject completed.")
+                } else {
+                    val errMsg = resolveEjectErrorMessage(app, e)
+                    val detailLog = buildEjectExceptionDetailLog(e)
+                    safeEjectStore.markFailed(
+                        drive.deviceId,
+                        drive.displayName,
+                        errMsg,
+                        detailLog = detailLog
+                    )
+                    logger.error(TAG, "Safe eject failed for '${drive.displayName}': ${e.message ?: errMsg}")
+                    if (writeStore.progress.value.phase == WritePhase.COMPLETED) {
+                        prefsStore.appendSummaryNoteToLatestCompletedWrite(
+                            drive.displayName,
+                            "Eject open error: ${e.message ?: errMsg}"
+                        )
+                    }
+                }
+            } finally {
+                disconnectWatcher.cancel()
+                if (activeEjectRun === run) {
+                    activeEjectRun = null
+                    usbMonitor.setEjectActive(false)
+                }
+            }
+        }
+    }
+
     override fun onCleared() {
         activeHealthRun?.cancelled?.set(true)
+        activeEjectRun?.cancelled?.set(true)
         healthCheckJob?.cancel()
+        ejectJob?.cancel()
         super.onCleared()
     }
 
@@ -906,6 +1208,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setVerifyAfterWrite(enabled: Boolean) {
         prefsStore.setVerifyAfterWrite(enabled)
         logger.info(TAG, "Post-write SHA-256 verification set to $enabled")
+    }
+
+    fun setAutoEjectAfterWrite(enabled: Boolean) {
+        prefsStore.setAutoEjectAfterWrite(enabled)
+        logger.info(TAG, "Auto-eject after write set to $enabled")
     }
 
     fun setWindowsBypassTpm(enabled: Boolean) {

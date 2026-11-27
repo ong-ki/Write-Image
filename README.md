@@ -110,7 +110,7 @@ Because Android's `UsbManager` only enumerates external USB OTG peripherals, int
 - **Real-Time Progress & Transfer Speed Graph** — Displays overall percentage, confirmed written/total bytes, elapsed clock, remaining ETA, live 20-second throughput chart, and Current / Average / Peak MB/s metrics derived strictly from confirmed written bytes.
 - **Foreground Service & Instant Cancellation** — Runs flashing inside a `dataSync` Foreground Service with a partial `WakeLock`, live notification progress, screen-awake handling while active, and cooperative cancellation + clean resource teardown.
 - **Non-Destructive USB Health Check** — Runs a quick capacity, sequential read/write speed, SHA-256 sample verification, and connection-stability diagnostic without wiping existing files on a formatted drive.
-- **Guided Flashing Workflow** — Highlights the active setup step label (`USB Drive` -> `ISO Image` -> `Flashing Mode` -> `CREATE BOOTABLE USB`) with subtle text-only pulsing cues.
+- **Guided Flashing Workflow** — Highlights the active setup step label (`USB Drive` -> `ISO Image` -> `Flashing Mode` -> `WRITE TO USB`) with subtle text-only pulsing cues.
 - **Appearance & Customization**
   - **System Default, Light Theme, and Dark Theme** with immediate switching.
   - **Four distinct Progress Bar Styles**: `Classic`, `Neon Glow`, `Gradient`, and `Segmented`.
@@ -142,7 +142,7 @@ Because Android's `UsbManager` only enumerates external USB OTG peripherals, int
 2. **Select the USB Drive** — Tap **USB Drive → Select**, choose your external drive, and grant Android USB Host permission when prompted.
 3. **Select an ISO Image** — Tap **ISO Image → Select** and pick a Windows or Linux `.iso` / `.img` file.
 4. **Choose a Flashing Mode** — Confirm **Auto Detect**, **Windows**, or **Linux** (for Windows ISOs, you can also configure optional Windows 11 bypass flags if needed).
-5. **Start Flashing** — Tap **CREATE BOOTABLE USB**, review the target drive and erase warning, and confirm.
+5. **Start Flashing** — Tap **WRITE TO USB**, review the target drive and erase warning, and confirm.
 6. **Wait for Completion** — Keep the USB drive firmly connected until writing, cache flush, and SHA-256 verification finish.
 
 ---

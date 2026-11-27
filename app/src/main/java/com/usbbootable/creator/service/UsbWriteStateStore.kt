@@ -18,6 +18,7 @@ data class PendingWriteJob(
     val driveInfo: UsbDriveInfo,
     val requestedBufferBytes: Int = 0,
     val verifyAfterWrite: Boolean = true,
+    val autoEjectAfterWrite: Boolean = false,
     val windowsBypassOptions: WindowsBypassOptions = WindowsBypassOptions.NONE
 )
 

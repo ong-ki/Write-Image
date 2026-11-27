@@ -170,6 +170,9 @@ class MainActivity : ComponentActivity() {
                     onConfirmStartWrite = viewModel::startBootableUsbCreation,
                     onCancelWrite = viewModel::cancelActiveWrite,
                     onDismissFinishedStatus = viewModel::dismissFinishedStatus,
+                    onEjectUsb = viewModel::ejectSelectedUsb,
+                    onRetryEject = viewModel::retryEjectUsb,
+                    onDismissEjectBanner = viewModel::dismissEjectBanner,
                     onStartUsbHealthCheck = viewModel::startUsbHealthCheck,
                     onCancelUsbHealthCheck = viewModel::cancelUsbHealthCheck,
                     onDismissUsbHealthCheck = viewModel::dismissUsbHealthCheck,
@@ -180,6 +183,7 @@ class MainActivity : ComponentActivity() {
                     onResetAllSettings = viewModel::restoreDefaults,
                     onSetBufferOption = viewModel::setBufferOption,
                     onSetVerifyAfterWrite = viewModel::setVerifyAfterWrite,
+                    onSetAutoEjectAfterWrite = viewModel::setAutoEjectAfterWrite,
                         onClearHistory = viewModel::clearHistory,
                         onClearLogs = viewModel::clearLogs
                     )

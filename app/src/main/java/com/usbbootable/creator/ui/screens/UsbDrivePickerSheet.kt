@@ -1,6 +1,5 @@
 package com.usbbootable.creator.ui.screens
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,16 +19,11 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Usb
 import androidx.compose.material.icons.rounded.UsbOff
 import androidx.compose.material.icons.rounded.Warning
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -70,7 +64,7 @@ fun UsbDrivePickerSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
+                .padding(horizontal = 16.dp)
                 .padding(bottom = 28.dp)
         ) {
             Row(
@@ -101,67 +95,23 @@ fun UsbDrivePickerSheet(
             Spacer(modifier = Modifier.height(16.dp))
 
             if (!isUsbHostSupported) {
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Warning,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onErrorContainer
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = "This device does not report Android USB Host (OTG) hardware support.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
-                        )
-                    }
-                }
+                AppBanner(
+                    message = "This device does not report Android USB Host (OTG) hardware support.",
+                    tone = BannerTone.ERROR,
+                    icon = Icons.Rounded.Warning,
+                    rounded = true
+                )
             } else if (drives.isEmpty()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.large,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.UsbOff,
-                            contentDescription = null,
-                            modifier = Modifier.size(40.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = "No USB Flash Drive Detected",
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "1. Connect a USB flash drive via a USB-C / Micro-USB OTG adapter.\n" +
-                                "2. Enable \"OTG Connection\" in phone Settings if your OEM requires it (Oppo, Realme, OnePlus, Vivo).\n" +
-                                "3. Tap Refresh if the drive was connected before opening the app.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        OutlinedButton(onClick = onRefresh) {
-                            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("SCAN USB OTG")
-                        }
-                    }
-                }
+                AppEmptyState(
+                    icon = Icons.Rounded.UsbOff,
+                    title = "No USB Flash Drive Detected",
+                    message = "1. Connect a USB flash drive via a USB-C / Micro-USB OTG adapter.\n" +
+                        "2. Enable \"OTG Connection\" in phone Settings if your OEM requires it (Oppo, Realme, OnePlus, Vivo).\n" +
+                        "3. Tap Refresh if the drive was connected before opening the app.",
+                    compact = false,
+                    actionLabel = "SCAN USB OTG",
+                    onAction = onRefresh
+                )
             } else {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -171,149 +121,130 @@ fun UsbDrivePickerSheet(
                         val isSelected = drive.deviceId == selectedDriveId
                         val isSupported = drive.transportSupport == UsbTransportSupport.SUPPORTED_BOT
 
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable(enabled = isSupported) {
-                                    onSelectDrive(drive.deviceId)
-                                    if (drive.hasPermission && drive.isProbed) {
-                                        onDismiss()
-                                    }
-                                },
-                            border = if (isSelected) {
-                                BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
-                            } else {
-                                BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-                            },
-                            colors = CardDefaults.cardColors(
-                                containerColor = if (isSelected) {
-                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
-                                } else {
-                                    MaterialTheme.colorScheme.surface
+                        AppCard(
+                            modifier = Modifier.clickable(enabled = isSupported) {
+                                onSelectDrive(drive.deviceId)
+                                if (drive.hasPermission && drive.isProbed) {
+                                    onDismiss()
                                 }
-                            )
+                            },
+                            accentBorderColor = if (isSelected) MaterialTheme.colorScheme.primary else null,
+                            borderWidth = if (isSelected) 2.dp else 1.dp,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Column(modifier = Modifier.padding(14.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Usb,
-                                        contentDescription = null,
-                                        tint = if (isSupported) {
-                                            MaterialTheme.colorScheme.primary
-                                        } else {
-                                            MaterialTheme.colorScheme.error
-                                        }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                StatusIconBadge(
+                                    icon = Icons.Rounded.Usb,
+                                    tint = if (isSupported) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.error
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = drive.displayName,
+                                        style = MaterialTheme.typography.titleMedium
                                     )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "VID:PID ${drive.vidPidHex} • ${drive.deviceName}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CheckCircle,
+                                        contentDescription = "Selected",
+                                        tint = statusSuccessColor()
+                                    )
+                                }
+                            }
+
+                            when {
+                                drive.transportSupport == UsbTransportSupport.UNSUPPORTED_UASP_ONLY -> {
+                                    AppBanner(
+                                        message = "Unsupported protocol: UASP-only enclosure (0x62) without Bulk-Only Transport fallback.",
+                                        tone = BannerTone.ERROR,
+                                        rounded = true
+                                    )
+                                }
+
+                                !drive.hasPermission -> {
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Text(
-                                            text = drive.displayName,
-                                            style = MaterialTheme.typography.titleMedium
+                                            text = "USB Host permission required to read capacity",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = statusWarningColor()
                                         )
+                                        AppTonalButton(
+                                            text = "GRANT",
+                                            onClick = { onRequestPermission(drive.deviceId) }
+                                        )
+                                    }
+                                }
+
+                                drive.probeError != null -> {
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        AppBanner(
+                                            message = drive.probeError,
+                                            tone = BannerTone.ERROR,
+                                            rounded = true
+                                        )
+                                        AppOutlineButton(
+                                            text = "RETRY SCSI PROBE",
+                                            onClick = { onRetryProbe(drive.deviceId) },
+                                            compactTextStyle = true
+                                        )
+                                    }
+                                }
+
+                                !drive.isProbed -> {
+                                    Text(
+                                        text = "Probing SCSI geometry & capacity...",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+
+                                else -> {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
                                         Text(
-                                            text = "VID:PID ${drive.vidPidHex} • ${drive.deviceName}",
+                                            text = ByteUtils.formatDecimalCapacity(drive.capacityBytes),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = statusSuccessColor(),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "${drive.logicalBlockSize} B sectors",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
-                                    if (isSelected) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.CheckCircle,
-                                            contentDescription = "Selected",
-                                            tint = statusSuccessColor()
-                                        )
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.height(10.dp))
-
-                                when {
-                                    drive.transportSupport == UsbTransportSupport.UNSUPPORTED_UASP_ONLY -> {
-                                        Text(
-                                            text = "Unsupported protocol: UASP-only enclosure (0x62) without Bulk-Only Transport fallback.",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.error
-                                        )
-                                    }
-
-                                    !drive.hasPermission -> {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
+                                    if (drive.isWriteProtected) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Lock,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp),
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
                                             Text(
-                                                text = "USB Host permission required to read capacity",
+                                                text = "Hardware write-protected (read-only)",
                                                 style = MaterialTheme.typography.bodySmall,
-                                                color = statusWarningColor(),
-                                                modifier = Modifier.weight(1f)
+                                                color = MaterialTheme.colorScheme.error
                                             )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Button(onClick = { onRequestPermission(drive.deviceId) }) {
-                                                Text("GRANT")
-                                            }
-                                        }
-                                    }
-
-                                    drive.probeError != null -> {
-                                        Text(
-                                            text = drive.probeError,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.error
-                                        )
-                                        Spacer(modifier = Modifier.height(8.dp))
-                                        OutlinedButton(onClick = { onRetryProbe(drive.deviceId) }) {
-                                            Text("RETRY SCSI PROBE")
-                                        }
-                                    }
-
-                                    !drive.isProbed -> {
-                                        Text(
-                                            text = "Probing SCSI geometry & capacity...",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-
-                                    else -> {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = ByteUtils.formatDecimalCapacity(drive.capacityBytes),
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = statusSuccessColor(),
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text(
-                                                text = "${drive.logicalBlockSize} B sectors",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                        if (drive.isWriteProtected) {
-                                            Spacer(modifier = Modifier.height(6.dp))
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Icon(
-                                                    imageVector = Icons.Rounded.Lock,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(16.dp),
-                                                    tint = MaterialTheme.colorScheme.error
-                                                )
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    text = "Hardware write-protected (read-only)",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.error
-                                                )
-                                            }
                                         }
                                     }
                                 }

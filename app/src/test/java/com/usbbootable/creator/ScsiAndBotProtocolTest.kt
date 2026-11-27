@@ -9,6 +9,7 @@ import com.usbbootable.creator.core.usb.UsbDisconnectedException
 import com.usbbootable.creator.core.usb.UsbStorageException
 import com.usbbootable.creator.core.usb.UsbWriteProtectedException
 import com.usbbootable.creator.core.util.ByteUtils
+import com.usbbootable.creator.core.util.OperationLogger
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -234,6 +235,214 @@ class ScsiAndBotProtocolTest {
         }
     }
 
+    @Test
+    fun startStopUnitCdbEncodingMatchesScsiSpec() {
+        val ejectCdb = ScsiCommandSet.startStopUnit(start = false, loadEject = true)
+        assertEquals(6, ejectCdb.size)
+        assertEquals(ScsiCommandSet.OP_START_STOP_UNIT, ejectCdb[0])
+        assertEquals(0x00.toByte(), ejectCdb[1])
+        assertEquals(0x02.toByte(), ejectCdb[4])
+
+        val stopCdb = ScsiCommandSet.startStopUnit(start = false, loadEject = false)
+        assertEquals(6, stopCdb.size)
+        assertEquals(ScsiCommandSet.OP_START_STOP_UNIT, stopCdb[0])
+        assertEquals(0x00.toByte(), stopCdb[4])
+    }
+
+    @Test
+    fun ejectUnitSendsSynchronizeCacheThenTestUnitReadyThenStartStopUnit() {
+        val mockUsb = VirtualUsbScsiFlashDrive(totalBlocks = 64, blockSize = 512)
+        val dev = ScsiBlockDevice(transport = UsbBotTransport(io = mockUsb, sleepMs = {}), sleepMs = {})
+        dev.initialize()
+        mockUsb.ejectOpcodeTrace.clear()
+
+        val result = dev.ejectUnit()
+        assertTrue(result.syncCacheSucceeded)
+        assertTrue(result.testUnitReadySucceeded)
+        assertTrue(result.startStopUnitSucceeded)
+        assertFalse(result.allCommandsFailed)
+        assertEquals(1, mockUsb.syncCacheCount)
+        assertEquals(1, mockUsb.startStopUnitCount)
+        assertEquals(listOf(0x35, 0x00, 0x1B), mockUsb.ejectOpcodeTrace)
+        assertEquals(listOf(0x02), mockUsb.startStopUnitFlags)
+    }
+
+    @Test
+    fun ejectUnitToleratesUnsupportedStartStopUnitAndLogsDiagnostics() {
+        val mockUsb = VirtualUsbScsiFlashDrive(
+            totalBlocks = 64,
+            blockSize = 512,
+            startStopUnitIllegalOpcode = true
+        )
+        val logger = OperationLogger()
+        val dev = ScsiBlockDevice(
+            transport = UsbBotTransport(io = mockUsb, logger = logger, sleepMs = {}),
+            logger = logger,
+            sleepMs = {}
+        )
+        dev.initialize()
+        mockUsb.ejectOpcodeTrace.clear()
+
+        val result = dev.ejectUnit()
+        assertTrue(result.syncCacheSucceeded)
+        assertTrue(result.testUnitReadySucceeded)
+        assertFalse(result.startStopUnitSucceeded)
+        assertTrue(result.anyCommandSucceeded)
+        assertFalse(result.allCommandsFailed)
+        assertEquals(1, mockUsb.syncCacheCount)
+        assertEquals(1, mockUsb.startStopUnitCount)
+        assertEquals(listOf(0x02), mockUsb.startStopUnitFlags)
+
+        val logDump = logger.entries.value.joinToString("\n") { it.message }
+        assertTrue("Expected opcode 0x1B in log: $logDump", logDump.contains("0x1B"))
+        assertTrue("Expected senseKey=0x05 in log: $logDump", logDump.contains("senseKey=0x05"))
+        assertTrue("Expected ASC=0x20 in log: $logDump", logDump.contains("ASC=0x20"))
+    }
+
+    @Test
+    fun ejectUnitTriesStartStopUnitOnceWithLoej1AndStart0WithoutFallback() {
+        val mockUsb = VirtualUsbScsiFlashDrive(
+            totalBlocks = 64,
+            blockSize = 512,
+            startStopUnitLoejUnsupportedOnly = true
+        )
+        val dev = ScsiBlockDevice(transport = UsbBotTransport(io = mockUsb, sleepMs = {}), sleepMs = {})
+        dev.initialize()
+        mockUsb.ejectOpcodeTrace.clear()
+
+        val result = dev.ejectUnit()
+        assertTrue(result.syncCacheSucceeded)
+        assertTrue(result.testUnitReadySucceeded)
+        assertFalse(result.startStopUnitSucceeded)
+        assertTrue(result.anyCommandSucceeded)
+        assertEquals(1, mockUsb.syncCacheCount)
+        assertEquals(1, mockUsb.startStopUnitCount)
+        assertEquals(listOf(0x02), mockUsb.startStopUnitFlags)
+        assertEquals(listOf(0x35, 0x00, 0x1B), mockUsb.ejectOpcodeTrace)
+    }
+
+    @Test
+    fun ejectUnitRecoversFromSynchronizeCacheCswRetryMinus1AndContinues() {
+        val mockUsb = VirtualUsbScsiFlashDrive(
+            totalBlocks = 64,
+            blockSize = 512,
+            failSyncCacheCswWithMinus1 = true
+        )
+        val logger = OperationLogger()
+        val transport = UsbBotTransport(io = mockUsb, logger = logger, sleepMs = {})
+        val dev = ScsiBlockDevice(transport = transport, logger = logger, sleepMs = {})
+        dev.initialize()
+        mockUsb.ejectOpcodeTrace.clear()
+        mockUsb.clearHaltInCount = 0
+        mockUsb.clearHaltOutCount = 0
+        mockUsb.requestSenseCount = 0
+
+        val result = dev.ejectUnit()
+        assertFalse(result.syncCacheSucceeded)
+        assertTrue(result.testUnitReadySucceeded)
+        assertTrue(result.startStopUnitSucceeded)
+        assertTrue(result.anyCommandSucceeded)
+        assertFalse(result.allCommandsFailed)
+
+        // Must clear halt on both bulk endpoints, send REQUEST SENSE, and continue to TUR -> START STOP UNIT
+        assertTrue("Expected Bulk-IN halt clear", mockUsb.clearHaltInCount >= 1)
+        assertTrue("Expected Bulk-OUT halt clear", mockUsb.clearHaltOutCount >= 1)
+        assertTrue("Expected REQUEST SENSE after SYNCHRONIZE CACHE failure", mockUsb.requestSenseCount >= 1)
+        assertEquals(1, mockUsb.syncCacheCount)
+        assertEquals(1, mockUsb.startStopUnitCount)
+        // TUR runs twice if BOT reset raised UNIT ATTENTION (0x06/0x29), then START STOP UNIT
+        assertEquals(0x35, mockUsb.ejectOpcodeTrace.first())
+        assertTrue(0x00 in mockUsb.ejectOpcodeTrace)
+        assertEquals(0x1B, mockUsb.ejectOpcodeTrace.last())
+
+        val logDump = logger.entries.value.joinToString("\n") { it.message }
+        assertTrue("Expected opcode 0x35 in log: $logDump", logDump.contains("0x35"))
+        assertTrue("Expected usbCode=-1 in log: $logDump", logDump.contains("usbCode=-1"))
+    }
+
+    @Test
+    fun ejectUnitReportsAllCommandsFailedWithoutThrowingWhenAllScsiCommandsFail() {
+        val mockUsb = VirtualUsbScsiFlashDrive(
+            totalBlocks = 64,
+            blockSize = 512
+        )
+        val logger = OperationLogger()
+        val dev = ScsiBlockDevice(
+            transport = UsbBotTransport(io = mockUsb, logger = logger, sleepMs = {}),
+            logger = logger,
+            sleepMs = {}
+        )
+        dev.initialize()
+        mockUsb.failAllEjectCommandsWithCswMinus1 = true
+        mockUsb.ejectOpcodeTrace.clear()
+
+        val result = dev.ejectUnit()
+        assertFalse(result.syncCacheSucceeded)
+        assertFalse(result.testUnitReadySucceeded)
+        assertFalse(result.startStopUnitSucceeded)
+        assertTrue(result.allCommandsFailed)
+        assertFalse(result.anyCommandSucceeded)
+        assertEquals(listOf(0x35, 0x00, 0x1B), mockUsb.ejectOpcodeTrace)
+        assertEquals(3, result.failingDiagnostics.size)
+
+        val logDump = logger.entries.value.joinToString("\n") { it.message }
+        assertTrue(logDump.contains("0x35"))
+        assertTrue(logDump.contains("0x00"))
+        assertTrue(logDump.contains("0x1B"))
+        assertTrue(logDump.contains("usbCode=-1"))
+    }
+
+    @Test
+    fun ejectUnitPerformsBotResetRecoveryBeforeFirstCommandWhenBotStateIsBad() {
+        val mockUsb = VirtualUsbScsiFlashDrive(
+            totalBlocks = 256,
+            blockSize = 512,
+            failCswWithRead1OnFirst64KWrite = true
+        )
+        val transport = UsbBotTransport(io = mockUsb, sleepMs = {})
+        val dev = ScsiBlockDevice(transport = transport, sleepMs = {})
+        dev.initialize()
+
+        // Put transport into bad BOT state via CSW failure on a raw command
+        try {
+            transport.executeCommand(
+                lun = 0,
+                cdb = ScsiCommandSet.read10(0L, 128),
+                direction = BotDirection.IN,
+                dataBuffer = ByteArray(128 * 512),
+                dataLength = 128 * 512,
+                commandName = "READ_TEST"
+            )
+        } catch (_: UsbStorageException) {
+        }
+        assertTrue(transport.isBotStateBad)
+        val resetsBeforeEject = mockUsb.massStorageResetCount
+        mockUsb.ejectEventTrace.clear()
+
+        val result = dev.ejectUnit()
+        assertTrue(result.anyCommandSucceeded)
+        assertTrue(mockUsb.massStorageResetCount > resetsBeforeEject)
+        assertEquals("RESET", mockUsb.ejectEventTrace.firstOrNull())
+    }
+
+    @Test
+    fun ejectUnitThrowsDisconnectedWhenUnpluggedDuringStartStopUnit() {
+        val mockUsb = VirtualUsbScsiFlashDrive(
+            totalBlocks = 64,
+            blockSize = 512,
+            disconnectOnStartStopUnit = true
+        )
+        val dev = ScsiBlockDevice(transport = UsbBotTransport(io = mockUsb, sleepMs = {}), sleepMs = {})
+        dev.initialize()
+
+        try {
+            dev.ejectUnit()
+            fail("Expected UsbDisconnectedException when unplugged during eject")
+        } catch (_: UsbDisconnectedException) {
+            assertEquals(1, mockUsb.syncCacheCount)
+        }
+    }
+
     /**
      * Spec-accurate virtual USB BOT + SCSI flash drive emulator supporting fault injection
      * for CSW `read=1` / stall conditions, partial bulkOut transfers, and BOT Reset Recovery.
@@ -247,7 +456,12 @@ class ScsiAndBotProtocolTest {
         private val maxAcceptedBulkOutSlice: Int = Int.MAX_VALUE,
         private var injectStray1ByteBeforeCswOnce: Boolean = false,
         private val permanentCswFailureOnWrites: Boolean = false,
-        private var failSyncCacheWithIoErrorOnce: Boolean = false
+        private var failSyncCacheWithIoErrorOnce: Boolean = false,
+        private var failSyncCacheCswWithMinus1: Boolean = false,
+        var failAllEjectCommandsWithCswMinus1: Boolean = false,
+        private val startStopUnitIllegalOpcode: Boolean = false,
+        private val startStopUnitLoejUnsupportedOnly: Boolean = false,
+        private val disconnectOnStartStopUnit: Boolean = false
     ) : UsbBulkIo {
 
         override val interfaceId: Int = 0
@@ -261,6 +475,12 @@ class ScsiAndBotProtocolTest {
         var clearHaltInCount: Int = 0
         var clearHaltOutCount: Int = 0
         var writeCdbCount: Int = 0
+        var syncCacheCount: Int = 0
+        var requestSenseCount: Int = 0
+        var startStopUnitCount: Int = 0
+        val ejectOpcodeTrace = mutableListOf<Int>()
+        val ejectEventTrace = mutableListOf<String>()
+        val startStopUnitFlags = mutableListOf<Int>()
 
         private val storage = ByteArray(totalBlocks * blockSize)
 
@@ -276,6 +496,7 @@ class ScsiAndBotProtocolTest {
         private var lastAsc: Int = 0
 
         private var corruptNextCswWithRead1: Boolean = false
+        private var failNextCswWithMinus1: Boolean = false
         private var lockedUntilTurFailure: Boolean = false
 
         override fun isConnected(): Boolean = connected
@@ -297,11 +518,13 @@ class ScsiAndBotProtocolTest {
             if (requestType == 0x21 && request == 0xFF) {
                 // BULK_ONLY_MASS_STORAGE_RESET
                 massStorageResetCount++
+                ejectEventTrace.add("RESET")
                 pendingOutExpected = 0
                 pendingOutReceived = 0
                 pendingInData = ByteArray(0)
                 pendingInOffset = 0
                 corruptNextCswWithRead1 = false
+                failNextCswWithMinus1 = false
                 // Per SCSI spec, bus reset raises UNIT ATTENTION (0x06 / 0x29) on next TEST UNIT READY
                 unitAttentionOnce = true
                 return 0
@@ -368,7 +591,11 @@ class ScsiAndBotProtocolTest {
                 }
 
                 ScsiCommandSet.OP_TEST_UNIT_READY -> {
-                    if (lockedUntilTurFailure) {
+                    ejectOpcodeTrace.add(0x00)
+                    ejectEventTrace.add("TUR")
+                    if (failAllEjectCommandsWithCswMinus1) {
+                        failNextCswWithMinus1 = true
+                    } else if (lockedUntilTurFailure) {
                         // Simulate dead controller after write failure
                         corruptNextCswWithRead1 = true
                     } else if (unitAttentionOnce) {
@@ -380,6 +607,7 @@ class ScsiAndBotProtocolTest {
                 }
 
                 ScsiCommandSet.OP_REQUEST_SENSE -> {
+                    requestSenseCount++
                     val sense = ByteArray(18)
                     sense[0] = 0x70
                     sense[2] = lastSenseKey.toByte()
@@ -407,6 +635,10 @@ class ScsiAndBotProtocolTest {
                     val lba = ByteUtils.readU32BE(buffer, 17)
                     val count = ByteUtils.readU16BE(buffer, 22)
                     val byteLen = count * blockSize
+                    if (failCswWithRead1OnFirst64KWrite && count >= 128) {
+                        failCswWithRead1OnFirst64KWrite = false
+                        corruptNextCswWithRead1 = true
+                    }
                     pendingInData = storage.copyOfRange((lba * blockSize).toInt(), (lba * blockSize).toInt() + byteLen)
                 }
 
@@ -430,7 +662,47 @@ class ScsiAndBotProtocolTest {
                 }
 
                 ScsiCommandSet.OP_SYNCHRONIZE_CACHE_10 -> {
-                    pendingStatus = UsbBotTransport.CSW_STATUS_PASSED
+                    syncCacheCount++
+                    ejectOpcodeTrace.add(0x35)
+                    ejectEventTrace.add("SYNC")
+                    if (failAllEjectCommandsWithCswMinus1) {
+                        failNextCswWithMinus1 = true
+                    } else if (failSyncCacheCswWithMinus1) {
+                        failSyncCacheCswWithMinus1 = false
+                        failNextCswWithMinus1 = true
+                    } else {
+                        pendingStatus = UsbBotTransport.CSW_STATUS_PASSED
+                    }
+                }
+
+                ScsiCommandSet.OP_START_STOP_UNIT -> {
+                    startStopUnitCount++
+                    ejectOpcodeTrace.add(0x1B)
+                    ejectEventTrace.add("START_STOP")
+                    val flags = buffer[19].toInt() and 0xFF
+                    startStopUnitFlags.add(flags)
+                    if (disconnectOnStartStopUnit) {
+                        connected = false
+                        return -1
+                    }
+                    when {
+                        failAllEjectCommandsWithCswMinus1 -> {
+                            failNextCswWithMinus1 = true
+                        }
+                        startStopUnitIllegalOpcode -> {
+                            pendingStatus = UsbBotTransport.CSW_STATUS_FAILED
+                            lastSenseKey = 0x05 // ILLEGAL REQUEST
+                            lastAsc = 0x20      // Invalid command operation code
+                        }
+                        startStopUnitLoejUnsupportedOnly && (flags and 0x02) != 0 -> {
+                            pendingStatus = UsbBotTransport.CSW_STATUS_FAILED
+                            lastSenseKey = 0x05 // ILLEGAL REQUEST
+                            lastAsc = 0x24      // Invalid field in CDB
+                        }
+                        else -> {
+                            pendingStatus = UsbBotTransport.CSW_STATUS_PASSED
+                        }
+                    }
                 }
             }
             return length
@@ -445,6 +717,10 @@ class ScsiAndBotProtocolTest {
                 System.arraycopy(pendingInData, pendingInOffset, buffer, offset, toCopy)
                 pendingInOffset += toCopy
                 return toCopy
+            }
+
+            if (failNextCswWithMinus1) {
+                return -1
             }
 
             if (corruptNextCswWithRead1) {

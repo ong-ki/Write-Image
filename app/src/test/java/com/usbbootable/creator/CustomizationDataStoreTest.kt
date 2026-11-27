@@ -31,6 +31,7 @@ class CustomizationDataStoreTest {
         assertEquals(ThemeMode.SYSTEM, defaults.themeMode)
         assertEquals(WriteBufferOption.AUTO, defaults.bufferOption)
         assertTrue(defaults.verifyAfterWrite)
+        assertFalse(defaults.autoEjectAfterWrite)
         assertFalse(defaults.windowsBypassOptions.hasAnyEnabled)
     }
 

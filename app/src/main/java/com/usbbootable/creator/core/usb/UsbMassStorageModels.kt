@@ -78,3 +78,80 @@ class UsbWriteProtectedException(
 class UsbClaimInterfaceException(
     message: String
 ) : UsbStorageException(message)
+
+data class ScsiCommandDiagnostic(
+    val commandName: String,
+    val opcode: Int,
+    val succeeded: Boolean,
+    val cswStatus: Int? = null,
+    val usbErrorCode: Int? = null,
+    val senseData: ScsiSenseData? = null,
+    val clearInRc: Int? = null,
+    val clearOutRc: Int? = null,
+    val detail: String = ""
+) {
+    val opcodeHex: String
+        get() = "0x%02X".format(opcode and 0xFF)
+
+    fun formatFailureSummary(): String {
+        val senseText = if (senseData != null) {
+            "senseKey=0x%02X/ASC=0x%02X/ASCQ=0x%02X".format(
+                senseData.senseKey,
+                senseData.asc,
+                senseData.ascq
+            )
+        } else {
+            "senseKey=N/A/ASC=N/A"
+        }
+        val usbParts = buildList {
+            usbErrorCode?.let { add("usb=$it") }
+            cswStatus?.let { add("csw=0x%02X".format(it and 0xFF)) }
+            clearInRc?.let { add("clearIn=$it") }
+            clearOutRc?.let { add("clearOut=$it") }
+        }.ifEmpty { listOf("usb=N/A") }.joinToString(",")
+        return "$opcodeHex($commandName) [$senseText, $usbParts]"
+    }
+
+    fun formatLogLine(): String {
+        val senseText = if (senseData != null) {
+            "senseKey=0x%02X, ASC=0x%02X, ASCQ=0x%02X (${senseData.describe()})".format(
+                senseData.senseKey,
+                senseData.asc,
+                senseData.ascq
+            )
+        } else {
+            "senseKey=N/A, ASC=N/A"
+        }
+        val usbParts = buildList {
+            usbErrorCode?.let { add("usbCode=$it") }
+            cswStatus?.let { add("cswStatus=0x%02X".format(it and 0xFF)) }
+            clearInRc?.let { add("clearInRc=$it") }
+            clearOutRc?.let { add("clearOutRc=$it") }
+        }.ifEmpty { listOf("usbCode=N/A") }.joinToString(", ")
+        val extra = if (detail.isNotBlank()) " | $detail" else ""
+        return "opcode=$opcodeHex ($commandName) | $senseText | $usbParts$extra"
+    }
+}
+
+data class UsbEjectResult(
+    val syncCacheSucceeded: Boolean,
+    val testUnitReadySucceeded: Boolean,
+    val startStopUnitSucceeded: Boolean,
+    val diagnostics: List<ScsiCommandDiagnostic> = emptyList(),
+    val logText: String = ""
+) {
+    val anyCommandSucceeded: Boolean
+        get() = syncCacheSucceeded || testUnitReadySucceeded || startStopUnitSucceeded
+
+    val allCommandsFailed: Boolean
+        get() = !anyCommandSucceeded
+
+    val failingDiagnostics: List<ScsiCommandDiagnostic>
+        get() = diagnostics.filterNot { it.succeeded }
+
+    fun formatFailingHistoryNote(): String? {
+        val failed = failingDiagnostics
+        if (failed.isEmpty()) return null
+        return failed.joinToString("; ") { it.formatFailureSummary() }
+    }
+}

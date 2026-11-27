@@ -1,5 +1,6 @@
 package com.usbbootable.creator.ui.screens
 
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material3.AlertDialog
@@ -12,6 +13,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import com.usbbootable.creator.ui.theme.GlassDialogShape
 import com.usbbootable.creator.ui.theme.glassDialogContainerColor
 import com.usbbootable.creator.ui.theme.glassDialogEnter
@@ -47,7 +49,7 @@ fun ConfirmResetDefaultsDialog(
             Text(
                 text = "All customized application settings will be restored to their original defaults, " +
                     "including theme mode, progress bar style, neon colors, glow effects, buffer size, " +
-                    "verification, and Windows bypass options.\n\n" +
+                    "verification, auto-eject, and Windows bypass options.\n\n" +
                     "Your ISO files, USB drives, personal files, operation history, and Recent Operations " +
                     "will not be changed.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -57,17 +59,26 @@ fun ConfirmResetDefaultsDialog(
         confirmButton = {
             Button(
                 onClick = onConfirm,
+                shape = HomeControlShape,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary
-                )
+                ),
+                modifier = Modifier.heightIn(min = 48.dp)
             ) {
-                Text(text = "RESET", fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = "RESET",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("CANCEL")
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
+                Text("CANCEL", style = MaterialTheme.typography.labelLarge)
             }
         }
     )

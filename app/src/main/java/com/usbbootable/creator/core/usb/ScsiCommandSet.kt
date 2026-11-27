@@ -49,6 +49,7 @@ object ScsiCommandSet {
     const val OP_REQUEST_SENSE: Byte = 0x03
     const val OP_INQUIRY: Byte = 0x12
     const val OP_MODE_SENSE_6: Byte = 0x1A
+    const val OP_START_STOP_UNIT: Byte = 0x1B
     const val OP_READ_CAPACITY_10: Byte = 0x25
     const val OP_READ_10: Byte = 0x28
     const val OP_WRITE_10: Byte = 0x2A
@@ -100,6 +101,16 @@ object ScsiCommandSet {
 
     fun synchronizeCache10(): ByteArray = ByteArray(10).apply {
         this[0] = OP_SYNCHRONIZE_CACHE_10
+    }
+
+    fun startStopUnit(
+        start: Boolean = false,
+        loadEject: Boolean = true,
+        immediate: Boolean = false
+    ): ByteArray = ByteArray(6).apply {
+        this[0] = OP_START_STOP_UNIT
+        this[1] = if (immediate) 0x01 else 0x00
+        this[4] = ((if (loadEject) 0x02 else 0x00) or (if (start) 0x01 else 0x00)).toByte()
     }
 
     fun parseInquiry(data: ByteArray): ScsiInquiryData {

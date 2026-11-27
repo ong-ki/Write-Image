@@ -16,6 +16,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -37,12 +40,18 @@ import com.usbbootable.creator.core.safety.PreflightCheckResult
 import com.usbbootable.creator.core.storage.AppearanceCustomization
 import com.usbbootable.creator.core.storage.AppSettings
 import com.usbbootable.creator.core.storage.ProgressBarStyle
+import com.usbbootable.creator.core.usb.UsbBotCommandException
 import com.usbbootable.creator.core.usb.UsbDriveInfo
 import com.usbbootable.creator.core.usb.UsbTransportSupport
+import com.usbbootable.creator.core.util.LogEntry
+import com.usbbootable.creator.core.util.LogLevel
 import com.usbbootable.creator.core.writer.SpeedSample
 import com.usbbootable.creator.core.writer.TransferSpeedSnapshot
 import com.usbbootable.creator.core.writer.WritePhase
 import com.usbbootable.creator.core.writer.WriteProgress
+import com.usbbootable.creator.service.UsbEjectPhase
+import com.usbbootable.creator.service.UsbEjectState
+import com.usbbootable.creator.service.resolveEjectErrorMessage
 import com.usbbootable.creator.ui.AppTab
 import com.usbbootable.creator.ui.DashboardUiState
 import com.usbbootable.creator.ui.screens.MainTabsScaffold
@@ -52,6 +61,7 @@ import com.usbbootable.creator.ui.theme.GlassCardSurface
 import com.usbbootable.creator.ui.theme.ThemeMode
 import com.usbbootable.creator.ui.theme.UsbBootableCreatorTheme
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -129,7 +139,7 @@ class MainActivityUiTest {
         composeRule.onNodeWithText("ISO Image").assertIsDisplayed()
         composeRule.onNodeWithText("USB Drive").assertIsDisplayed()
         composeRule.onNodeWithText("Flashing Mode").assertIsDisplayed()
-        composeRule.onNodeWithText("CREATE BOOTABLE USB").assertIsDisplayed()
+        composeRule.onNodeWithText("WRITE TO USB").assertIsDisplayed()
         saveScreenshotIfRequested("home-dark.png")
 
         // Switch to Light Theme and verify Home Screen adapts cleanly
@@ -392,5 +402,162 @@ class VisualShowcaseUiTest {
             composeRule.onNodeWithText(style.label).assertIsDisplayed()
         }
         saveScreenshotIfRequested("progress-styles.png")
+    }
+
+    @Test
+    fun safeEjectButtonsBannersAndAutoEjectSettingRenderCorrectly() {
+        val demoDrive = UsbDriveInfo(
+            deviceId = 11,
+            deviceName = "/dev/bus/usb/001/011",
+            vendorId = 0x0781,
+            productId = 0x5581,
+            manufacturerName = "SanDisk",
+            productName = "Ultra",
+            serialNumber = null,
+            transportSupport = UsbTransportSupport.SUPPORTED_BOT,
+            hasPermission = true,
+            isProbed = true,
+            scsiVendor = "SanDisk",
+            scsiProduct = "Ultra",
+            logicalBlockSize = 512,
+            totalBlocks = 62_500_000L,
+            capacityBytes = 32_000_000_000L
+        )
+        var currentState by mutableStateOf(
+            DashboardUiState(
+                selectedTab = AppTab.HOME,
+                availableDrives = listOf(demoDrive),
+                selectedDrive = demoDrive,
+                writeProgress = WriteProgress(
+                    phase = WritePhase.COMPLETED,
+                    overallProgress = 1f,
+                    statusMessage = "Bootable USB created and verified! Safe to disconnect USB drive.",
+                    targetDeviceName = demoDrive.displayName,
+                    sourceIsoName = "ubuntu.iso"
+                ),
+                ejectState = UsbEjectState()
+            )
+        )
+
+        val logsFlow = MutableStateFlow(
+            listOf(
+                LogEntry(
+                    timestamp = "12:00:00.000",
+                    level = LogLevel.WARN,
+                    tag = "ScsiBlock",
+                    message = "Eject command failed (ignored): opcode=0x35 (SYNCHRONIZE_CACHE_10) | usbCode=-1",
+                    id = 1L
+                )
+            )
+        )
+
+        composeRule.setContent {
+            UsbBootableCreatorTheme(
+                themeMode = ThemeMode.DARK,
+                customization = AppearanceCustomization.DEFAULT
+            ) {
+                MainTabsScaffold(
+                    state = currentState,
+                    logsFlow = logsFlow,
+                    onSelectTab = { tab -> currentState = currentState.copy(selectedTab = tab) },
+                    onSelectIsoClick = {},
+                    onSelectDrive = {},
+                    onRequestUsbPermission = {},
+                    onRetryProbeDrive = {},
+                    onRefreshDrives = {},
+                    onConfirmStartWrite = {},
+                    onCancelWrite = {},
+                    onDismissFinishedStatus = {},
+                    onDismissBanner = {},
+                    onSetThemeMode = {},
+                    onSetBufferOption = {},
+                    onSetVerifyAfterWrite = {},
+                    onClearHistory = {},
+                    onClearLogs = {}
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Eject USB").assertIsDisplayed()
+
+        currentState = currentState.copy(
+            ejectState = UsbEjectState(
+                phase = UsbEjectPhase.EJECTING,
+                targetDeviceId = demoDrive.deviceId,
+                targetDeviceName = demoDrive.displayName
+            )
+        )
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Ejecting...").assertIsDisplayed()
+
+        currentState = currentState.copy(
+            selectedDrive = null,
+            ejectState = UsbEjectState(
+                phase = UsbEjectPhase.SUCCEEDED,
+                targetDeviceId = demoDrive.deviceId,
+                targetDeviceName = demoDrive.displayName
+            )
+        )
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Safe to remove your USB.").assertIsDisplayed()
+
+        currentState = currentState.copy(
+            ejectState = UsbEjectState(
+                phase = UsbEjectPhase.COMPLETED_WARNING,
+                targetDeviceId = demoDrive.deviceId,
+                targetDeviceName = demoDrive.displayName,
+                errorMessage = "Ejected. If your USB was just written, it's safe to remove.",
+                detailLog = "opcode=0x35 (SYNCHRONIZE_CACHE_10) | usbCode=-1"
+            )
+        )
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Ejected. If your USB was just written, it's safe to remove.").assertIsDisplayed()
+        composeRule.onNodeWithText("Details").assertIsDisplayed()
+        composeRule.onNodeWithText("Close").assertIsDisplayed()
+
+        val rawTechErr = UsbBotCommandException(
+            commandName = "SYNCHRONIZE_CACHE_10(0x35)",
+            endpointInfo = "IF#0 IN=0x81(512B) OUT=0x02(512B)",
+            transferredBytes = 0,
+            expectedBytes = 0,
+            usbErrorCode = -1,
+            recoveryStatus = "CSW retry returned -1",
+            resetPerformed = true
+        )
+        val friendly = resolveEjectErrorMessage(InstrumentationRegistry.getInstrumentation().targetContext, rawTechErr)
+        assertFalse(friendly.contains("SYNCHRONIZE_CACHE_10"))
+        assertFalse(friendly.contains("CSW"))
+
+        currentState = currentState.copy(
+            selectedDrive = demoDrive,
+            writeProgress = WriteProgress(),
+            ejectState = UsbEjectState(
+                phase = UsbEjectPhase.FAILED,
+                targetDeviceId = demoDrive.deviceId,
+                targetDeviceName = demoDrive.displayName,
+                errorMessage = "USB transfer failed on SYNCHRONIZE_CACHE_10 | CSW retry returned -1",
+                detailLog = rawTechErr.message
+            )
+        )
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Unable to open the USB drive to eject.").assertIsDisplayed()
+        composeRule.onNodeWithText("Details").assertIsDisplayed()
+        composeRule.onNodeWithText("Retry").assertIsDisplayed()
+        composeRule.onNodeWithText("Close").assertIsDisplayed()
+        composeRule.onNodeWithText("Details").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Eject Details").assertIsDisplayed()
+        composeRule.onNodeWithText("Copy").assertIsDisplayed()
+        composeRule.onNodeWithText("Copy").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Copied").assertIsDisplayed()
+        composeRule.onAllNodesWithText("Close").onFirst().performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Eject USB").assertIsDisplayed()
+
+        composeRule.onNodeWithText("Settings").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Eject automatically after write").assertIsDisplayed()
     }
 }

@@ -51,6 +51,7 @@ class UsbDeviceMonitor(
     private val probedCache = ConcurrentHashMap<Int, UsbDriveInfo>()
     private val rawDevices = ConcurrentHashMap<Int, UsbDevice>()
     private val probesInFlight = ConcurrentHashMap.newKeySet<Int>()
+    private val ejectedDeviceIds = ConcurrentHashMap.newKeySet<Int>()
 
     private val _drives = MutableStateFlow<List<UsbDriveInfo>>(emptyList())
     val drives: StateFlow<List<UsbDriveInfo>> = _drives.asStateFlow()
@@ -61,6 +62,9 @@ class UsbDeviceMonitor(
     @Volatile
     private var isWriteActive: Boolean = false
 
+    @Volatile
+    private var isEjectActive: Boolean = false
+
     private var registered = false
 
     private val usbHardwareReceiver = object : BroadcastReceiver() {
@@ -68,8 +72,12 @@ class UsbDeviceMonitor(
             val device = intent.usbDeviceExtra()
             when (intent.action) {
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    val name = device?.productName ?: device?.deviceName ?: "USB Device"
+                    val name = safeDeviceDisplayName(device)
                     logger.info(TAG, "USB device attached: $name")
+                    if (device != null) {
+                        ejectedDeviceIds.remove(device.deviceId)
+                        UsbDeviceSession.clearBadBotState(device.deviceId)
+                    }
                     refreshDevices()
                     if (device != null) {
                         _events.tryEmit(UsbEvent.DeviceAttached(device.deviceId, name))
@@ -77,7 +85,7 @@ class UsbDeviceMonitor(
                 }
 
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    val name = device?.productName ?: device?.deviceName ?: "USB Device"
+                    val name = safeDeviceDisplayName(device)
                     logger.warn(TAG, "USB device disconnected: $name")
                     if (device != null) {
                         synchronized(monitorLock) {
@@ -85,9 +93,28 @@ class UsbDeviceMonitor(
                             rawDevices.remove(device.deviceId)
                             _drives.value = _drives.value.filterNot { it.deviceId == device.deviceId }
                         }
+                        UsbDeviceSession.clearBadBotState(device.deviceId)
                         _events.tryEmit(UsbEvent.DeviceDetached(device.deviceId, name))
+                        refreshDevices(excludedDeviceId = device.deviceId)
+                    } else {
+                        // Fallback if EXTRA_DEVICE is missing on a vendor broadcast: diff active list safely.
+                        val currentIds = safeDeviceList().values.map { it.deviceId }.toSet()
+                        val missing = synchronized(monitorLock) {
+                            val removed = rawDevices.entries
+                                .filter { it.key !in currentIds }
+                                .map { it.key to safeDeviceDisplayName(it.value) }
+                            removed.forEach { (id, _) ->
+                                probedCache.remove(id)
+                                rawDevices.remove(id)
+                            }
+                            _drives.value = _drives.value.filter { it.deviceId in currentIds }
+                            removed
+                        }
+                        missing.forEach { (id, removedName) ->
+                            _events.tryEmit(UsbEvent.DeviceDetached(id, removedName))
+                        }
+                        refreshDevices()
                     }
-                    refreshDevices(excludedDeviceId = device?.deviceId)
                 }
             }
         }
@@ -137,16 +164,34 @@ class UsbDeviceMonitor(
         isWriteActive = active
     }
 
+    fun setEjectActive(active: Boolean) {
+        isEjectActive = active
+    }
+
+    fun isProbeInFlight(deviceId: Int): Boolean = deviceId in probesInFlight
+
+    fun markDeviceEjected(deviceId: Int) {
+        ejectedDeviceIds.add(deviceId)
+    }
+
+    fun clearEjectedMarker(deviceId: Int) {
+        ejectedDeviceIds.remove(deviceId)
+    }
+
+    fun isDeviceEjected(deviceId: Int): Boolean = deviceId in ejectedDeviceIds
+
+    fun consumeEjectedMarker(deviceId: Int): Boolean = ejectedDeviceIds.remove(deviceId)
+
     fun getUsbDevice(deviceId: Int): UsbDevice? {
-        return rawDevices[deviceId] ?: usbManager.deviceList.values.firstOrNull { it.deviceId == deviceId }
+        return rawDevices[deviceId] ?: safeDeviceList().values.firstOrNull { it.deviceId == deviceId }
     }
 
     fun isDeviceConnected(deviceId: Int): Boolean {
-        return usbManager.deviceList.values.any { it.deviceId == deviceId }
+        return safeDeviceList().values.any { it.deviceId == deviceId }
     }
 
     fun refreshDevices(excludedDeviceId: Int? = null) {
-        val currentMap = usbManager.deviceList
+        val currentMap = safeDeviceList()
         val toProbe = mutableListOf<Int>()
         synchronized(monitorLock) {
             val activeIds = currentMap.values
@@ -156,6 +201,7 @@ class UsbDeviceMonitor(
 
             // Remove stale entries for disconnected devices
             probedCache.keys.retainAll(activeIds)
+            ejectedDeviceIds.retainAll(activeIds)
             rawDevices.clear()
 
             val result = mutableListOf<UsbDriveInfo>()
@@ -165,7 +211,11 @@ class UsbDeviceMonitor(
                 if (support == UsbTransportSupport.UNSUPPORTED_NON_STORAGE) continue
 
                 rawDevices[device.deviceId] = device
-                val hasPerm = usbManager.hasPermission(device)
+                val hasPerm = try {
+                    usbManager.hasPermission(device)
+                } catch (_: Exception) {
+                    false
+                }
                 val cached = probedCache[device.deviceId]
 
                 val serial = if (hasPerm) {
@@ -195,7 +245,13 @@ class UsbDeviceMonitor(
                 }
                 result.add(info)
 
-                if (hasPerm && support == UsbTransportSupport.SUPPORTED_BOT && !info.isProbed && !isWriteActive) {
+                if (hasPerm &&
+                    support == UsbTransportSupport.SUPPORTED_BOT &&
+                    !info.isProbed &&
+                    !isWriteActive &&
+                    !isEjectActive &&
+                    device.deviceId !in ejectedDeviceIds
+                ) {
                     toProbe.add(device.deviceId)
                 }
             }
@@ -230,7 +286,7 @@ class UsbDeviceMonitor(
     }
 
     fun probeDriveAsync(deviceId: Int) {
-        if (isWriteActive) return
+        if (isWriteActive || isEjectActive || deviceId in ejectedDeviceIds) return
         if (!probesInFlight.add(deviceId)) return
         scope.launch {
             try {
@@ -242,7 +298,7 @@ class UsbDeviceMonitor(
     }
 
     private fun probeDriveBlocking(deviceId: Int) {
-        if (isWriteActive) return
+        if (isWriteActive || isEjectActive || deviceId in ejectedDeviceIds) return
         val device = getUsbDevice(deviceId) ?: return
         if (!usbManager.hasPermission(device)) return
         if (UsbDeviceSession.classifyDevice(device) != UsbTransportSupport.SUPPORTED_BOT) return
@@ -279,7 +335,8 @@ class UsbDeviceMonitor(
                     logicalBlockSize = blk.blockSize,
                     totalBlocks = blk.totalBlocks,
                     capacityBytes = blk.capacityBytes,
-                    isWriteProtected = blk.isReadOnly
+                    isWriteProtected = blk.isReadOnly,
+                    lun = blk.lun
                 )
                 synchronized(monitorLock) {
                     if (!rawDevices.containsKey(deviceId) || !isDeviceConnected(deviceId)) return
@@ -323,8 +380,25 @@ class UsbDeviceMonitor(
         _drives.value = current.sortedBy { it.deviceId }
     }
 
-    private fun Intent.usbDeviceExtra(): UsbDevice? {
-        return IntentCompat.getParcelableExtra(this, UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+    private fun safeDeviceList(): Map<String, UsbDevice> = try {
+        usbManager.deviceList ?: emptyMap()
+    } catch (_: Exception) {
+        emptyMap()
+    }
+
+    private fun safeDeviceDisplayName(device: UsbDevice?): String {
+        if (device == null) return "USB Device"
+        return try {
+            device.productName?.takeIf { it.isNotBlank() } ?: device.deviceName
+        } catch (_: Exception) {
+            "USB Device"
+        }
+    }
+
+    private fun Intent.usbDeviceExtra(): UsbDevice? = try {
+        IntentCompat.getParcelableExtra(this, UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+    } catch (_: Exception) {
+        null
     }
 
     companion object {

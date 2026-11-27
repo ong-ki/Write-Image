@@ -1,5 +1,8 @@
 package com.usbbootable.creator.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -8,13 +11,12 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,21 +29,24 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.Cancel
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Eject
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.HealthAndSafety
 import androidx.compose.material.icons.rounded.History
@@ -54,22 +59,19 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Usb
 import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -79,6 +81,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,11 +90,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -108,14 +114,16 @@ import com.usbbootable.creator.core.util.ByteUtils
 import com.usbbootable.creator.core.util.LogEntry
 import com.usbbootable.creator.core.writer.WindowsBypassOptions
 import com.usbbootable.creator.core.writer.WritePhase
+import com.usbbootable.creator.service.UsbEjectPhase
+import com.usbbootable.creator.service.UsbEjectState
 import com.usbbootable.creator.ui.AppTab
 import com.usbbootable.creator.ui.DashboardUiState
 import com.usbbootable.creator.ui.GuidedStep
 import com.usbbootable.creator.ui.GuidedStepText
 import com.usbbootable.creator.ui.GuidedWorkflowResolver
 import com.usbbootable.creator.ui.theme.GlassBackdropBox
-import com.usbbootable.creator.ui.theme.GlassCardShape14
-import com.usbbootable.creator.ui.theme.GlassCardSurface
+import com.usbbootable.creator.ui.theme.GlassCardShape16
+import com.usbbootable.creator.ui.theme.GlassDialogShape
 import com.usbbootable.creator.ui.theme.GlassMotion
 import com.usbbootable.creator.ui.theme.GlassTextWhite
 import com.usbbootable.creator.ui.theme.LocalAppColors
@@ -123,10 +131,12 @@ import com.usbbootable.creator.ui.theme.LocalNeonTheme
 import com.usbbootable.creator.ui.theme.ThemeMode
 import com.usbbootable.creator.ui.theme.effectivePrimaryColor
 import com.usbbootable.creator.ui.theme.glassBarSurfaceColor
-import com.usbbootable.creator.ui.theme.pressScale
+import com.usbbootable.creator.ui.theme.glassDialogContainerColor
+import com.usbbootable.creator.ui.theme.glassDialogEnter
 import com.usbbootable.creator.ui.theme.rememberMotionEnabled
 import com.usbbootable.creator.ui.theme.statusSuccessColor
 import com.usbbootable.creator.ui.theme.statusWarningColor
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.text.SimpleDateFormat
@@ -153,6 +163,9 @@ fun MainTabsScaffold(
     onConfirmStartWrite: () -> Unit,
     onCancelWrite: () -> Unit,
     onDismissFinishedStatus: () -> Unit,
+    onEjectUsb: () -> Unit = {},
+    onRetryEject: () -> Unit = {},
+    onDismissEjectBanner: () -> Unit = {},
     onStartUsbHealthCheck: () -> Unit = {},
     onCancelUsbHealthCheck: () -> Unit = {},
     onDismissUsbHealthCheck: () -> Unit = {},
@@ -163,14 +176,22 @@ fun MainTabsScaffold(
     onResetAllSettings: () -> Unit = {},
     onSetBufferOption: (WriteBufferOption) -> Unit,
     onSetVerifyAfterWrite: (Boolean) -> Unit,
+    onSetAutoEjectAfterWrite: (Boolean) -> Unit = {},
     onClearHistory: () -> Unit,
     onClearLogs: () -> Unit
 ) {
-    var showDrivePicker by remember { mutableStateOf(false) }
-    var showConfirmDialog by remember { mutableStateOf(false) }
-    var showGuideDialog by remember { mutableStateOf(false) }
-    var showLogSheet by remember { mutableStateOf(false) }
-    var showResetDefaultsDialog by remember { mutableStateOf(false) }
+    var showDrivePicker by rememberSaveable { mutableStateOf(false) }
+    var showConfirmDialog by rememberSaveable { mutableStateOf(false) }
+    var showGuideDialog by rememberSaveable { mutableStateOf(false) }
+    var showLogSheet by rememberSaveable { mutableStateOf(false) }
+    var showResetDefaultsDialog by rememberSaveable { mutableStateOf(false) }
+    var showEjectDetailsDialog by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(state.ejectState.phase) {
+        if (state.ejectState.phase == UsbEjectPhase.IDLE || state.ejectState.phase == UsbEjectPhase.EJECTING) {
+            showEjectDetailsDialog = false
+        }
+    }
 
     val appName = stringResource(id = R.string.app_name)
     val topTitle = when (state.selectedTab) {
@@ -223,12 +244,12 @@ fun MainTabsScaffold(
                             actionIconContentColor = MaterialTheme.colorScheme.onSurface
                         )
                     )
-                    HorizontalDivider(color = appColors.borderSubtle, thickness = 1.dp)
+                    AppDivider()
                 }
             },
             bottomBar = {
                 Column {
-                    HorizontalDivider(color = appColors.borderSubtle, thickness = 1.dp)
+                    AppDivider()
                     NavigationBar(
                         containerColor = barSurfaceColor,
                         tonalElevation = 0.dp
@@ -278,46 +299,25 @@ fun MainTabsScaffold(
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
+                AnimatedVisibility(visible = state.ejectState.phase != UsbEjectPhase.IDLE) {
+                    EjectStatusBanner(
+                        ejectState = state.ejectState,
+                        isWriteActive = state.writeProgress.phase.isActive || state.operationTimerRunning,
+                        onShowDetails = { showEjectDetailsDialog = true },
+                        onRetry = onRetryEject,
+                        onDismiss = onDismissEjectBanner
+                    )
+                }
+
                 AnimatedVisibility(visible = state.bannerMessage != null) {
                     state.bannerMessage?.let { msg ->
-                        Surface(
-                            color = if (appColors.isDark) {
-                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.88f)
-                            } else {
-                                MaterialTheme.colorScheme.secondaryContainer
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Usb,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = msg,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                IconButton(
-                                    onClick = onDismissBanner,
-                                    modifier = Modifier.size(26.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Close,
-                                        contentDescription = "Dismiss",
-                                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
-                        }
+                        AppBanner(
+                            message = msg,
+                            tone = BannerTone.INFO,
+                            icon = Icons.Rounded.Usb,
+                            rounded = false,
+                            onDismiss = onDismissBanner
+                        )
                     }
                 }
 
@@ -366,6 +366,7 @@ fun MainTabsScaffold(
                                     }
                                 },
                                 onStartUsbHealthCheck = onStartUsbHealthCheck,
+                                onEjectUsb = onEjectUsb,
                                 onOpenHistoryTab = { onSelectTab(AppTab.HISTORY) },
                                 onCancelWrite = onCancelWrite,
                                 onDismissFinishedStatus = onDismissFinishedStatus
@@ -386,6 +387,7 @@ fun MainTabsScaffold(
                                 },
                                 onSetBufferOption = onSetBufferOption,
                                 onSetVerifyAfterWrite = onSetVerifyAfterWrite,
+                                onSetAutoEjectAfterWrite = onSetAutoEjectAfterWrite,
                                 onOpenLogs = { showLogSheet = true },
                                 onOpenTechnicalGuide = { showGuideDialog = true }
                             )
@@ -451,6 +453,15 @@ fun MainTabsScaffold(
         )
     }
 
+    if (showEjectDetailsDialog && state.ejectState.phase != UsbEjectPhase.IDLE) {
+        val logs by logsFlow.collectAsStateWithLifecycle()
+        EjectDetailsDialog(
+            ejectState = state.ejectState,
+            logs = logs,
+            onDismiss = { showEjectDetailsDialog = false }
+        )
+    }
+
     if (state.usbHealthProgress.phase != UsbHealthPhase.IDLE) {
         UsbHealthCheckDialog(
             progress = state.usbHealthProgress,
@@ -461,15 +472,259 @@ fun MainTabsScaffold(
     }
 }
 
+@Composable
+private fun EjectStatusBanner(
+    ejectState: UsbEjectState,
+    isWriteActive: Boolean,
+    onShowDetails: () -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val tone = when (ejectState.phase) {
+        UsbEjectPhase.SUCCEEDED -> BannerTone.SUCCESS
+        UsbEjectPhase.FAILED -> BannerTone.ERROR
+        UsbEjectPhase.COMPLETED_WARNING,
+        UsbEjectPhase.DISCONNECTED_WARNING -> BannerTone.WARNING
+        UsbEjectPhase.EJECTING, UsbEjectPhase.IDLE -> BannerTone.INFO
+    }
+
+    val iconContentDescription = when (ejectState.phase) {
+        UsbEjectPhase.SUCCEEDED -> stringResource(R.string.cd_eject_status_success)
+        UsbEjectPhase.FAILED -> stringResource(R.string.cd_eject_status_error)
+        UsbEjectPhase.COMPLETED_WARNING,
+        UsbEjectPhase.DISCONNECTED_WARNING -> stringResource(R.string.cd_eject_status_warning)
+        UsbEjectPhase.EJECTING, UsbEjectPhase.IDLE -> null
+    }
+
+    val genericFailedMessage = stringResource(R.string.eject_banner_failed_generic)
+    val messageText = when (ejectState.phase) {
+        UsbEjectPhase.EJECTING -> stringResource(
+            R.string.eject_banner_progress,
+            ejectState.targetDeviceName.ifBlank { "USB" }
+        )
+        UsbEjectPhase.SUCCEEDED -> stringResource(R.string.eject_banner_safe_to_remove)
+        UsbEjectPhase.COMPLETED_WARNING -> ejectState.errorMessage?.takeIf {
+            it.isNotBlank() && !looksTechnicalMessage(it)
+        } ?: stringResource(R.string.eject_banner_all_commands_failed_warning)
+        UsbEjectPhase.FAILED -> ejectState.errorMessage?.takeIf {
+            it.isNotBlank() && !looksTechnicalMessage(it)
+        } ?: genericFailedMessage
+        UsbEjectPhase.DISCONNECTED_WARNING -> ejectState.errorMessage?.takeIf {
+            it.isNotBlank() && !looksTechnicalMessage(it)
+        } ?: stringResource(R.string.eject_banner_unplugged_warning)
+        UsbEjectPhase.IDLE -> ""
+    }
+
+    val showDetailsAction = ejectState.phase == UsbEjectPhase.FAILED ||
+        ejectState.phase == UsbEjectPhase.COMPLETED_WARNING ||
+        ejectState.phase == UsbEjectPhase.DISCONNECTED_WARNING ||
+        !ejectState.detailLog.isNullOrBlank()
+
+    AppBanner(
+        message = messageText,
+        tone = tone,
+        iconContentDescription = iconContentDescription,
+        isLoading = ejectState.phase == UsbEjectPhase.EJECTING,
+        rounded = false,
+        fontWeight = if (ejectState.phase == UsbEjectPhase.SUCCEEDED) FontWeight.SemiBold else FontWeight.Medium,
+        footerActions = if (ejectState.phase != UsbEjectPhase.EJECTING) {
+            { palette ->
+                if (showDetailsAction) {
+                    TextButton(
+                        onClick = onShowDetails,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.heightIn(min = 36.dp)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.eject_action_details),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = palette.content
+                        )
+                    }
+                }
+                if (ejectState.phase == UsbEjectPhase.FAILED) {
+                    TextButton(
+                        onClick = onRetry,
+                        enabled = !isWriteActive && !ejectState.isEjecting,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.heightIn(min = 36.dp)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.eject_action_retry),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.icon
+                        )
+                    }
+                }
+                TextButton(
+                    onClick = onDismiss,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier
+                        .heightIn(min = 36.dp)
+                        .semantics {
+                            contentDescription = "Close"
+                        }
+                ) {
+                    Text(
+                        text = stringResource(R.string.eject_action_close),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.content
+                    )
+                }
+            }
+        } else {
+            null
+        }
+    )
+}
+
+private fun looksTechnicalMessage(message: String): Boolean {
+    return message.contains(" | ") ||
+        message.contains("CSW", ignoreCase = false) ||
+        message.contains("SYNCHRONIZE_CACHE", ignoreCase = true) ||
+        message.contains("TEST_UNIT_READY", ignoreCase = true) ||
+        message.contains("START_STOP_UNIT", ignoreCase = true) ||
+        message.contains("Endpoints:", ignoreCase = true) ||
+        message.contains("UsbBot", ignoreCase = true) ||
+        message.contains("Exception", ignoreCase = false)
+}
+
+@Composable
+private fun EjectDetailsDialog(
+    ejectState: UsbEjectState,
+    logs: List<LogEntry>,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val appColors = LocalAppColors.current
+    var copied by remember { mutableStateOf(false) }
+
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(2_000L)
+            copied = false
+        }
+    }
+
+    val fullLogText = remember(logs, ejectState.detailLog, ejectState.errorMessage) {
+        buildString {
+            val detail = ejectState.detailLog?.takeIf { it.isNotBlank() }
+            if (detail != null) {
+                appendLine("=== Eject Diagnostics ===")
+                appendLine(detail.trimEnd())
+            }
+            if (logs.isNotEmpty()) {
+                if (isNotEmpty()) appendLine()
+                appendLine("=== Full Diagnostic Log (${logs.size} events) ===")
+                logs.forEach { entry ->
+                    appendLine("[${entry.timestamp}] [${entry.tag}] ${entry.message}")
+                }
+            }
+            if (isEmpty()) {
+                append(ejectState.errorMessage ?: "No diagnostic log entries recorded.")
+            }
+        }.trimEnd()
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = GlassDialogShape,
+        containerColor = glassDialogContainerColor(),
+        modifier = Modifier.glassDialogEnter(),
+        title = {
+            Text(
+                text = stringResource(R.string.eject_details_title),
+                style = MaterialTheme.typography.titleLarge
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (ejectState.targetDeviceName.isNotBlank()) {
+                    Text(
+                        text = ejectState.targetDeviceName,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Surface(
+                    color = appColors.surfaceInner,
+                    shape = HomeControlShape,
+                    border = BorderStroke(1.dp, appColors.borderSubtle),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 140.dp, max = 360.dp)
+                ) {
+                    SelectionContainer {
+                        Text(
+                            text = fullLogText,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace
+                            ),
+                            color = appColors.textPrimary,
+                            modifier = Modifier
+                                .verticalScroll(rememberScrollState())
+                                .padding(12.dp)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    cm?.setPrimaryClip(ClipData.newPlainText("USB Eject Log", fullLogText))
+                    copied = true
+                },
+                shape = HomeControlShape,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
+                Icon(
+                    imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = stringResource(
+                        if (copied) R.string.eject_details_copied else R.string.eject_details_copy
+                    ),
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
+                Text(
+                    text = stringResource(R.string.eject_action_close),
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
+        }
+    )
+}
+
 private fun tabIcon(tab: AppTab): ImageVector = when (tab) {
     AppTab.HOME -> Icons.Rounded.Home
     AppTab.HISTORY -> Icons.Rounded.History
     AppTab.SETTINGS -> Icons.Rounded.Settings
 }
 
+private enum class HomeMode { FORM, PROGRESS, RESULT }
+
 /**
- * Clean, unified Home screen integrating ISO selection, USB device selection & permission/probing,
- * bootable USB creation, live writing/verification telemetry, and recent operations.
+ * Home screen as a three-step flow (1. image, 2. USB drive, 3. write). While a write is in
+ * flight it is replaced by the progress screen, and afterwards by a success / failed / cancelled
+ * result screen. All state and callbacks are the existing ones; this is layout only.
  */
 @Composable
 private fun HomeTabContent(
@@ -486,6 +741,7 @@ private fun HomeTabContent(
     onRetryProbeDrive: (Int) -> Unit,
     onRequestCreateConfirm: () -> Unit,
     onStartUsbHealthCheck: () -> Unit,
+    onEjectUsb: () -> Unit,
     onOpenHistoryTab: () -> Unit,
     onCancelWrite: () -> Unit,
     onDismissFinishedStatus: () -> Unit
@@ -493,6 +749,7 @@ private fun HomeTabContent(
     val isWriting = state.writeProgress.phase.isActive
     val isStartingWrite = state.operationTimerRunning && state.writeProgress.phase == WritePhase.IDLE
     val isWriteInFlight = isWriting || state.operationTimerRunning
+    val isEjecting = state.ejectState.isEjecting
     val connectedCount = state.availableDrives.size
     val selectedDrive = state.selectedDrive
     val selectedIso = state.selectedIso
@@ -516,6 +773,7 @@ private fun HomeTabContent(
     val canCreate = state.preflight.canProceed &&
         state.flashingModeSelected &&
         !isWriteInFlight &&
+        !isEjecting &&
         !state.isAnalyzingIso &&
         !state.usbHealthProgress.phase.isActive
     val driveHasError = selectedDrive?.let {
@@ -546,342 +804,507 @@ private fun HomeTabContent(
         else -> MaterialTheme.colorScheme.primary
     }
 
-    val scrollState = rememberScrollState()
-    LaunchedEffect(isWriteInFlight) {
-        if (isWriteInFlight && scrollState.value > 0) {
-            scrollState.animateScrollTo(0)
+    val phase = state.writeProgress.phase
+    val mode = when {
+        isWriteInFlight -> HomeMode.PROGRESS
+        phase == WritePhase.COMPLETED || phase == WritePhase.FAILED || phase == WritePhase.CANCELLED ->
+            HomeMode.RESULT
+        else -> HomeMode.FORM
+    }
+    var showCancelConfirm by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(mode) {
+        if (mode != HomeMode.PROGRESS) showCancelConfirm = false
+    }
+    val motionEnabled = rememberMotionEnabled()
+
+    val isoName = state.writeProgress.sourceIsoName.ifBlank { selectedIso?.displayName.orEmpty() }
+    val driveName = state.writeProgress.targetDeviceName.ifBlank { selectedDrive?.displayName ?: "USB drive" }
+
+    AnimatedContent(
+        targetState = mode,
+        transitionSpec = {
+            if (!motionEnabled) {
+                fadeIn(tween(0)) togetherWith fadeOut(tween(0))
+            } else {
+                (fadeIn(tween(220, delayMillis = 60)) +
+                    scaleIn(initialScale = 0.98f, animationSpec = tween(220, delayMillis = 60))) togetherWith
+                    fadeOut(tween(90))
+            }
+        },
+        label = "home_mode_transition"
+    ) { currentMode ->
+        when (currentMode) {
+            HomeMode.PROGRESS -> ScreenColumn {
+                WriteProgressPanel(
+                    progress = state.writeProgress,
+                    speedSnapshot = state.speedSnapshot,
+                    elapsedSeconds = state.elapsedSeconds,
+                    fallbackTotalBytes = selectedIso?.sizeBytes ?: 0L,
+                    isoName = isoName,
+                    driveName = driveName,
+                    onCancel = { showCancelConfirm = true }
+                )
+            }
+
+            HomeMode.RESULT -> ScreenColumn {
+                WriteResultPanel(
+                    progress = state.writeProgress,
+                    elapsedSeconds = state.elapsedSeconds,
+                    isoName = isoName,
+                    driveName = driveName,
+                    canRetry = state.preflight.canProceed &&
+                        state.flashingModeSelected &&
+                        !state.isAnalyzingIso &&
+                        !isEjecting,
+                    ejectState = state.ejectState,
+                    hasConnectedDrive = selectedDrive != null,
+                    isWriteActive = isWriteInFlight,
+                    onEjectUsb = onEjectUsb,
+                    onDone = onDismissFinishedStatus,
+                    onRetry = {
+                        onDismissFinishedStatus()
+                        onRequestCreateConfirm()
+                    }
+                )
+            }
+
+            HomeMode.FORM -> ScreenColumn {
+                // Step 1 — image
+                StepCard(
+                    step = 1,
+                    icon = Icons.Rounded.Album,
+                    title = "ISO Image",
+                    value = when {
+                        state.isAnalyzingIso -> "Inspecting image..."
+                        selectedIso != null -> selectedIso.displayName
+                        else -> "No image selected"
+                    },
+                    subtitle = when {
+                        state.isoError != null -> state.isoError
+                        selectedIso != null ->
+                            "${ByteUtils.formatBytes(selectedIso.sizeBytes)} • ${selectedIso.bootSupport.headline}"
+                        else -> "Choose a Windows or Linux .iso / .img file"
+                    },
+                    isError = state.isoError != null,
+                    ready = selectedIso?.isAccessible == true,
+                    isLoading = state.isAnalyzingIso,
+                    empty = selectedIso == null && !state.isAnalyzingIso,
+                    completed = isoReady,
+                    emphasizeAction = selectedIso == null || state.isoError != null,
+                    actionLabel = if (selectedIso == null) "Select image" else "Change image",
+                    enabled = !isWriteInFlight && !isEjecting,
+                    onAction = onSelectIsoClick,
+                    titleGuideActive = guided.isCurrent(GuidedStep.ISO_IMAGE),
+                    titleGuideColor = guideColor
+                ) {
+                    // Warnings for the selected image (e.g. > 4 GiB dual partition or non-hybrid notice)
+                    selectedIso?.warnings?.takeIf { it.isNotEmpty() }?.let { warnings ->
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            warnings.forEach { warn ->
+                                Row(verticalAlignment = Alignment.Top) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.WarningAmber,
+                                        contentDescription = "Warning",
+                                        tint = statusWarningColor(),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = warn,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Step 2 — USB drive
+                val drive = selectedDrive
+                val driveNeedsPermission = drive != null &&
+                    drive.transportSupport == UsbTransportSupport.SUPPORTED_BOT &&
+                    !drive.hasPermission
+                val driveHasProbeError = drive != null && drive.probeError != null
+
+                StepCard(
+                    step = 2,
+                    icon = Icons.Rounded.Usb,
+                    title = "USB Drive",
+                    value = drive?.displayName ?: "No USB drive selected",
+                    subtitle = when {
+                        drive == null && connectedCount == 0 -> "Connect a flash drive via an OTG adapter"
+                        drive == null -> "$connectedCount drive(s) detected — tap Select drive"
+                        drive.transportSupport == UsbTransportSupport.UNSUPPORTED_UASP_ONLY ->
+                            "Unsupported UASP-only device (requires BOT 0x50)"
+                        !drive.hasPermission -> "USB permission required — tap Grant access"
+                        drive.probeError != null -> drive.probeError
+                        drive.isWriteProtected -> "Write-protected (read-only)"
+                        drive.isProbed ->
+                            "${ByteUtils.formatDecimalCapacity(drive.capacityBytes)} • VID:PID ${drive.vidPidHex}"
+                        else -> "Probing SCSI geometry & capacity..."
+                    },
+                    isError = driveHasProbeError || drive?.isWriteProtected == true ||
+                        drive?.transportSupport == UsbTransportSupport.UNSUPPORTED_UASP_ONLY,
+                    ready = drive?.isProbed == true && !drive.isWriteProtected,
+                    isLoading = drive != null && drive.hasPermission && !drive.isProbed && drive.probeError == null,
+                    empty = drive == null,
+                    completed = driveReady,
+                    emphasizeAction = drive == null || driveNeedsPermission || driveHasProbeError,
+                    actionLabel = when {
+                        driveNeedsPermission -> "Grant access"
+                        driveHasProbeError -> "Retry"
+                        drive == null -> "Select drive"
+                        else -> "Change drive"
+                    },
+                    enabled = !isWriteInFlight && !isEjecting,
+                    onAction = {
+                        when {
+                            driveNeedsPermission -> onRequestUsbPermission(drive.deviceId)
+                            driveHasProbeError -> onRetryProbeDrive(drive.deviceId)
+                            else -> onOpenDrivePicker()
+                        }
+                    },
+                    titleGuideActive = guided.isCurrent(GuidedStep.USB_DRIVE),
+                    titleGuideColor = guideColor
+                ) {
+                    // Non-destructive health check once a supported drive is ready
+                    if (drive != null && drive.transportSupport == UsbTransportSupport.SUPPORTED_BOT &&
+                        drive.hasPermission && drive.isProbed
+                    ) {
+                        val isBusy = isWriteInFlight || isEjecting || state.usbHealthProgress.phase.isActive
+                        AppOutlineButton(
+                            text = "CHECK USB HEALTH",
+                            onClick = onStartUsbHealthCheck,
+                            enabled = !isBusy,
+                            icon = Icons.Rounded.HealthAndSafety,
+                            compactTextStyle = true
+                        )
+                    }
+
+                    if (drive != null || isEjecting) {
+                        val canTapEject = !isWriteInFlight && !isEjecting && !state.usbHealthProgress.phase.isActive
+                        AppOutlineButton(
+                            text = stringResource(R.string.action_eject_usb),
+                            onClick = onEjectUsb,
+                            enabled = canTapEject,
+                            isLoading = isEjecting,
+                            loadingText = stringResource(R.string.eject_status_ejecting),
+                            icon = Icons.Rounded.Eject,
+                            iconContentDescription = stringResource(R.string.cd_eject_usb),
+                            compactTextStyle = true
+                        )
+                    }
+                }
+
+                // Step 3 — write (flashing mode + primary action)
+                AppCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        StepBadge(step = 3, completed = false, isError = false)
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Text(
+                            text = "Write",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.semantics { heading() }
+                        )
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                GuidedStepText(
+                                    text = "Flashing Mode",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    defaultColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    guideActive = guided.isCurrent(GuidedStep.FLASHING_MODE),
+                                    guideColor = guideColor
+                                )
+                                if (guided.isCompleted(GuidedStep.FLASHING_MODE)) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Icon(
+                                        imageVector = Icons.Rounded.CheckCircle,
+                                        contentDescription = "Flashing mode selected",
+                                        tint = statusSuccessColor(),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                            selectedIso?.let { iso ->
+                                val detectedBadge = when (iso.detectedOsFamily) {
+                                    DetectedOsFamily.WINDOWS -> "Windows 10/11"
+                                    DetectedOsFamily.LINUX -> "Linux"
+                                    DetectedOsFamily.RAW_DISK_IMAGE -> "Raw Image"
+                                    DetectedOsFamily.UNSUPPORTED -> "Non-Hybrid"
+                                }
+                                val badgeColor = when (iso.detectedOsFamily) {
+                                    DetectedOsFamily.WINDOWS,
+                                    DetectedOsFamily.LINUX,
+                                    DetectedOsFamily.RAW_DISK_IMAGE -> statusSuccessColor()
+                                    DetectedOsFamily.UNSUPPORTED -> statusWarningColor()
+                                }
+                                StatusPill(text = detectedBadge, color = badgeColor)
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FlashingMode.entries.forEach { flashMode ->
+                                AppSelectableOptionButton(
+                                    label = flashMode.shortLabel,
+                                    selected = state.flashingMode == flashMode,
+                                    onClick = { onSetFlashingMode(flashMode) },
+                                    enabled = !isWriteInFlight && !isEjecting,
+                                    accessibilityDescription = flashMode.label,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+
+                    // Contextual Windows requirements bypass (Windows mode, or a Windows ISO in Auto mode)
+                    val showWindowsBypass = state.flashingMode == FlashingMode.WINDOWS ||
+                        (state.flashingMode == FlashingMode.AUTO &&
+                            state.selectedIso?.detectedOsFamily == DetectedOsFamily.WINDOWS)
+                    AnimatedVisibility(visible = showWindowsBypass) {
+                        WindowsBypassSection(
+                            options = state.settings.windowsBypassOptions,
+                            enabled = !isWriteInFlight && !isEjecting,
+                            onToggleTpm = onSetWindowsBypassTpm,
+                            onToggleSecureBoot = onSetWindowsBypassSecureBoot,
+                            onToggleRam = onSetWindowsBypassRam,
+                            onToggleCpu = onSetWindowsBypassCpu,
+                            onToggleAll = onSetWindowsBypassAll
+                        )
+                    }
+
+                    // One primary action; disabled until the image and drive are both ready
+                    MainActionsSection(
+                        canCreate = canCreate,
+                        isFlashing = isWriteInFlight,
+                        guideActive = guided.isCurrent(GuidedStep.CREATE),
+                        guideError = guided.currentStepHasError,
+                        onCreateClick = onRequestCreateConfirm
+                    )
+
+                    val blocker = state.preflight.blockers.firstOrNull()
+                    val hint = when {
+                        blocker != null && (selectedIso != null || selectedDrive != null) -> blocker
+                        selectedIso == null && selectedDrive == null ->
+                            "Select an image and a USB drive to enable Write."
+                        !state.flashingModeSelected && state.preflight.canProceed ->
+                            "Choose a flashing mode to enable Write."
+                        else -> null
+                    }
+                    if (hint != null) {
+                        Text(
+                            text = hint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (blocker != null && (selectedIso != null || selectedDrive != null)) {
+                                statusWarningColor()
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                }
+
+                // Recent operations — final section on the Home screen
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SectionHeader(
+                        title = "Recent Operations",
+                        actionLabel = if (state.history.isNotEmpty()) "View all" else null,
+                        onAction = onOpenHistoryTab
+                    )
+
+                    if (state.history.isEmpty()) {
+                        AppEmptyState(
+                            icon = Icons.Rounded.History,
+                            message = "No USB writes yet. Finished, failed and cancelled writes appear here.",
+                            compact = true
+                        )
+                    } else {
+                        val recentHistory = remember(state.history) { state.history.take(3) }
+                        AppCard(
+                            contentPadding = PaddingValues(0.dp),
+                            verticalArrangement = Arrangement.Top
+                        ) {
+                            recentHistory.forEachIndexed { idx, record ->
+                                if (idx > 0) {
+                                    AppDivider()
+                                }
+                                CompactHistoryRow(record)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    Column(
+    if (showCancelConfirm) {
+        ConfirmCancelDialog(
+            onConfirm = {
+                showCancelConfirm = false
+                onCancelWrite()
+            },
+            onDismiss = { showCancelConfirm = false }
+        )
+    }
+}
+
+@Composable
+private fun StepBadge(step: Int, completed: Boolean, isError: Boolean) {
+    val success = statusSuccessColor()
+    val error = MaterialTheme.colorScheme.error
+    val container = when {
+        completed -> success.copy(alpha = 0.16f)
+        isError -> error.copy(alpha = 0.16f)
+        else -> MaterialTheme.colorScheme.primaryContainer
+    }
+    val content = when {
+        completed -> success
+        isError -> error
+        else -> MaterialTheme.colorScheme.onPrimaryContainer
+    }
+    Box(
         modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(scrollState)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(container)
+            .semantics { contentDescription = "Step $step" + if (completed) ", done" else "" },
+        contentAlignment = Alignment.Center
     ) {
-        // Live Transfer Speed & Progress Card at the top of Home
-        ActiveOperationCard(
-            progress = state.writeProgress,
-            speedSnapshot = state.speedSnapshot,
-            elapsedSeconds = state.elapsedSeconds,
-            fallbackTotalBytes = state.selectedIso?.sizeBytes ?: 0L,
-            isReadyToStart = canCreate,
-            isStarting = isStartingWrite,
-            onCancel = onCancelWrite,
-            onDismissFinished = onDismissFinishedStatus
-        )
-
-        // 1. ISO Image Card — static card; only the "ISO Image" label blinks when guided
-        HomeSelectionCard {
-            HomeStatusRow(
-                completed = guided.isCompleted(GuidedStep.ISO_IMAGE),
-                titleGuideActive = guided.isCurrent(GuidedStep.ISO_IMAGE),
-                titleGuideColor = guideColor,
-                icon = Icons.Rounded.Album,
-                title = "ISO Image",
-                value = when {
-                    state.isAnalyzingIso -> "Inspecting image..."
-                    state.selectedIso != null -> state.selectedIso.displayName
-                    else -> "Not selected"
-                },
-                subtitle = when {
-                    state.isoError != null -> state.isoError
-                    state.selectedIso != null -> "${ByteUtils.formatBytes(state.selectedIso.sizeBytes)} • ${state.selectedIso.bootSupport.headline}"
-                    else -> "Select a Windows or Linux ISO"
-                },
-                isError = state.isoError != null,
-                ready = state.selectedIso?.isAccessible == true,
-                isLoading = state.isAnalyzingIso,
-                actionLabel = if (state.selectedIso == null) "Select" else "Change",
-                enabled = !isWriteInFlight,
-                onAction = onSelectIsoClick
+        if (completed) {
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                tint = content,
+                modifier = Modifier.size(20.dp)
             )
-
-            // Warnings for selected ISO (e.g. >4 GiB dual partition or non-hybrid optical notice)
-            state.selectedIso?.warnings?.takeIf { it.isNotEmpty() }?.let { warnings ->
-                Spacer(modifier = Modifier.height(6.dp))
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                ) {
-                    warnings.forEach { warn ->
-                        Row(verticalAlignment = Alignment.Top) {
-                            Icon(
-                                imageVector = Icons.Rounded.WarningAmber,
-                                contentDescription = null,
-                                tint = statusWarningColor(),
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
-                            Text(
-                                text = warn,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. USB Drive Card — identical static card; only the "USB Drive" label blinks when guided
-        val drive = state.selectedDrive
-        val driveNeedsPermission = drive != null &&
-            drive.transportSupport == UsbTransportSupport.SUPPORTED_BOT &&
-            !drive.hasPermission
-        val driveHasProbeError = drive != null && drive.probeError != null
-
-        HomeSelectionCard {
-            HomeStatusRow(
-                completed = guided.isCompleted(GuidedStep.USB_DRIVE),
-                titleGuideActive = guided.isCurrent(GuidedStep.USB_DRIVE),
-                titleGuideColor = guideColor,
-                icon = Icons.Rounded.Usb,
-                title = "USB Drive",
-                value = drive?.displayName ?: "Not selected",
-                subtitle = when {
-                    drive == null && connectedCount == 0 -> "Connect a flash drive via OTG"
-                    drive == null -> "$connectedCount drive(s) detected — tap Select"
-                    drive.transportSupport == UsbTransportSupport.UNSUPPORTED_UASP_ONLY ->
-                        "Unsupported UASP-only device (requires BOT 0x50)"
-                    !drive.hasPermission -> "USB permission required — tap Grant"
-                    drive.probeError != null -> drive.probeError
-                    drive.isWriteProtected -> "Write-protected (read-only)"
-                    drive.isProbed -> "${ByteUtils.formatDecimalCapacity(drive.capacityBytes)} • VID:PID ${drive.vidPidHex}"
-                    else -> "Probing SCSI geometry & capacity..."
-                },
-                isError = driveHasProbeError || drive?.isWriteProtected == true ||
-                    drive?.transportSupport == UsbTransportSupport.UNSUPPORTED_UASP_ONLY,
-                ready = drive?.isProbed == true && !drive.isWriteProtected,
-                isLoading = drive != null && drive.hasPermission && !drive.isProbed && drive.probeError == null,
-                actionLabel = when {
-                    driveNeedsPermission -> "Grant"
-                    driveHasProbeError -> "Retry"
-                    drive == null -> "Select"
-                    else -> "Change"
-                },
-                enabled = !isWriteInFlight,
-                onAction = {
-                    when {
-                        driveNeedsPermission -> onRequestUsbPermission(drive.deviceId)
-                        driveHasProbeError -> onRetryProbeDrive(drive.deviceId)
-                        else -> onOpenDrivePicker()
-                    }
-                }
-            )
-
-            // Compact "CHECK USB HEALTH" button shown after a supported USB drive is selected
-            if (drive != null && drive.transportSupport == UsbTransportSupport.SUPPORTED_BOT && drive.hasPermission && drive.isProbed) {
-                val isBusy = isWriteInFlight || state.usbHealthProgress.phase.isActive
-                val healthInteraction = remember { MutableInteractionSource() }
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = onStartUsbHealthCheck,
-                    enabled = !isBusy,
-                    interactionSource = healthInteraction,
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(36.dp)
-                        .pressScale(healthInteraction, enabled = !isBusy)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.HealthAndSafety,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "CHECK USB HEALTH",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-        }
-
-        // 3. Flashing Mode — static card directly above Create Bootable USB; only "Flashing Mode" text blinks
-        GlassCardSurface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = GlassCardShape14
-        ) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        GuidedStepText(
-                            text = "Flashing Mode",
-                            style = MaterialTheme.typography.labelMedium,
-                            defaultColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            guideActive = guided.isCurrent(GuidedStep.FLASHING_MODE),
-                            guideColor = guideColor
-                        )
-                        if (guided.isCompleted(GuidedStep.FLASHING_MODE)) {
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Icon(
-                                imageVector = Icons.Rounded.CheckCircle,
-                                contentDescription = "Flashing mode selected",
-                                tint = statusSuccessColor(),
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
-                    }
-                    state.selectedIso?.let { iso ->
-                        val detectedBadge = when (iso.detectedOsFamily) {
-                            DetectedOsFamily.WINDOWS -> "Windows 10/11"
-                            DetectedOsFamily.LINUX -> "Linux"
-                            DetectedOsFamily.RAW_DISK_IMAGE -> "Raw Image"
-                            DetectedOsFamily.UNSUPPORTED -> "Non-Hybrid"
-                        }
-                        val badgeColor = when (iso.detectedOsFamily) {
-                            DetectedOsFamily.WINDOWS,
-                            DetectedOsFamily.LINUX,
-                            DetectedOsFamily.RAW_DISK_IMAGE -> statusSuccessColor()
-                            DetectedOsFamily.UNSUPPORTED -> statusWarningColor()
-                        }
-                        StatusPill(text = detectedBadge, color = badgeColor)
-                    }
-                }
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    FlashingMode.entries.forEach { mode ->
-                        val selected = state.flashingMode == mode
-                        OutlinedButton(
-                            onClick = { onSetFlashingMode(mode) },
-                            enabled = !isWriteInFlight,
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(
-                                width = if (selected) 1.5.dp else 1.dp,
-                                color = if (selected) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    appColors.borderSubtle
-                                }
-                            ),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (selected) {
-                                    if (appColors.isDark) {
-                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
-                                    } else {
-                                        MaterialTheme.colorScheme.primaryContainer
-                                    }
-                                } else {
-                                    appColors.surfaceInner
-                                },
-                                contentColor = if (selected) {
-                                    if (appColors.isDark) GlassTextWhite else MaterialTheme.colorScheme.onPrimaryContainer
-                                } else {
-                                    appColors.textSecondary
-                                },
-                                disabledContainerColor = appColors.surfaceInner,
-                                disabledContentColor = appColors.textDisabled
-                            ),
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(38.dp)
-                        ) {
-                            Text(
-                                text = mode.shortLabel,
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Contextual Windows Requirements Bypass (only when Windows mode or Windows ISO in Auto mode)
-        val showWindowsBypass = state.flashingMode == FlashingMode.WINDOWS ||
-            (state.flashingMode == FlashingMode.AUTO && state.selectedIso?.detectedOsFamily == DetectedOsFamily.WINDOWS)
-        AnimatedVisibility(visible = showWindowsBypass) {
-            WindowsBypassSection(
-                options = state.settings.windowsBypassOptions,
-                enabled = !isWriteInFlight,
-                onToggleTpm = onSetWindowsBypassTpm,
-                onToggleSecureBoot = onSetWindowsBypassSecureBoot,
-                onToggleRam = onSetWindowsBypassRam,
-                onToggleCpu = onSetWindowsBypassCpu,
-                onToggleAll = onSetWindowsBypassAll
-            )
-        }
-
-        // 4. Primary Action: CREATE BOOTABLE USB
-        MainActionsSection(
-            canCreate = canCreate,
-            isFlashing = isWriteInFlight,
-            guideActive = guided.isCurrent(GuidedStep.CREATE),
-            guideError = guided.currentStepHasError,
-            onCreateClick = onRequestCreateConfirm
-        )
-
-        // Inline Pre-flight Blockers when ISO or USB is selected but not yet ready to flash
-        if (!isWriteInFlight && state.preflight.blockers.isNotEmpty() && (state.selectedIso != null || state.selectedDrive != null)) {
+        } else {
             Text(
-                text = state.preflight.blockers.first(),
-                style = MaterialTheme.typography.bodySmall,
-                color = statusWarningColor(),
-                modifier = Modifier.padding(horizontal = 4.dp)
+                text = step.toString(),
+                style = MaterialTheme.typography.labelLarge,
+                color = content
+            )
+        }
+    }
+}
+
+/**
+ * Step card: numbered badge, title, selected item (name + size/capacity) or an empty state,
+ * optional extra content, and a full-width 48dp action button.
+ */
+@Composable
+private fun StepCard(
+    step: Int,
+    icon: ImageVector,
+    title: String,
+    value: String,
+    subtitle: String,
+    isError: Boolean,
+    ready: Boolean,
+    isLoading: Boolean,
+    empty: Boolean,
+    completed: Boolean,
+    emphasizeAction: Boolean,
+    actionLabel: String,
+    enabled: Boolean,
+    onAction: () -> Unit,
+    titleGuideActive: Boolean,
+    titleGuideColor: Color,
+    content: @Composable ColumnScope.() -> Unit = {}
+) {
+    AppCard(
+        accentBorderColor = if (isError) MaterialTheme.colorScheme.error else null
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            StepBadge(step = step, completed = completed, isError = isError)
+            Spacer(modifier = Modifier.width(16.dp))
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                GuidedStepText(
+                    text = title,
+                    style = MaterialTheme.typography.labelMedium,
+                    defaultColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    guideActive = titleGuideActive,
+                    guideColor = titleGuideColor
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(
+                        text = value,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = if (empty) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isError) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = when {
+                    isError -> MaterialTheme.colorScheme.error
+                    ready -> statusSuccessColor()
+                    else -> MaterialTheme.colorScheme.primary
+                },
+                modifier = Modifier.size(24.dp)
             )
         }
 
-        // 5. Recent Operations — final section on the Home Screen
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Recent Operations",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (state.history.isNotEmpty()) {
-                    TextButton(
-                        onClick = onOpenHistoryTab,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                        modifier = Modifier.height(28.dp)
-                    ) {
-                        Text("View all", style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
+        content()
 
-            if (state.history.isEmpty()) {
-                Text(
-                    text = "No completed or cancelled USB writes yet.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                val recentHistory = remember(state.history) { state.history.take(3) }
-                GlassCardSurface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = GlassCardShape14
-                ) {
-                    Column {
-                        recentHistory.forEachIndexed { idx, record ->
-                            if (idx > 0) {
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-                            }
-                            CompactHistoryRow(record)
-                        }
-                    }
-                }
-            }
+        val actionModifier = Modifier.semantics { contentDescription = "$actionLabel: $title" }
+        if (emphasizeAction) {
+            AppTonalButton(
+                text = actionLabel,
+                onClick = onAction,
+                enabled = enabled,
+                modifier = actionModifier
+            )
+        } else {
+            AppOutlineButton(
+                text = actionLabel,
+                onClick = onAction,
+                enabled = enabled,
+                modifier = actionModifier
+            )
         }
     }
 }
@@ -896,11 +1319,12 @@ private fun WindowsBypassSection(
     onToggleCpu: (Boolean) -> Unit,
     onToggleAll: (Boolean) -> Unit
 ) {
-    GlassCardSurface(
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = GlassCardShape14
+        shape = GlassCardShape16,
+        color = LocalAppColors.current.surfaceInner
     ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -909,7 +1333,10 @@ private fun WindowsBypassSection(
                 Text(
                     text = "Windows Requirements Bypass",
                     style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { heading() }
                 )
                 if (options.hasAnyEnabled) {
                     StatusPill(
@@ -919,8 +1346,6 @@ private fun WindowsBypassSection(
                 }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
-
             BypassCheckboxRow(
                 label = "Enable All Bypasses",
                 checked = options.allEnabled,
@@ -929,10 +1354,7 @@ private fun WindowsBypassSection(
                 onCheckedChange = onToggleAll
             )
 
-            HorizontalDivider(
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                modifier = Modifier.padding(vertical = 2.dp)
-            )
+            AppDivider()
 
             BypassCheckboxRow(
                 label = "Bypass TPM 2.0 Check",
@@ -959,28 +1381,30 @@ private fun WindowsBypassSection(
                 onCheckedChange = onToggleCpu
             )
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             Row(verticalAlignment = Alignment.Top) {
                 Icon(
                     imageVector = Icons.Rounded.WarningAmber,
-                    contentDescription = null,
+                    contentDescription = "Warning",
                     tint = statusWarningColor(),
                     modifier = Modifier
-                        .padding(top = 1.dp)
-                        .size(14.dp)
+                        .padding(top = 2.dp)
+                        .size(16.dp)
                 )
-                Spacer(modifier = Modifier.width(5.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = "Bypassing hardware requirements allows installation on unsupported PCs, but does not make unsupported hardware officially supported.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            Spacer(modifier = Modifier.height(8.dp))
         }
     }
 }
 
+/** Whole-row toggle with a 48dp minimum touch target and checkbox semantics. */
 @Composable
 private fun BypassCheckboxRow(
     label: String,
@@ -993,21 +1417,24 @@ private fun BypassCheckboxRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(6.dp))
-            .clickable(enabled = enabled) { onCheckedChange(!checked) }
-            .padding(vertical = 1.dp),
+            .heightIn(min = 48.dp)
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Checkbox,
+                onValueChange = onCheckedChange
+            ),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Checkbox(
             checked = checked,
-            onCheckedChange = onCheckedChange,
-            enabled = enabled,
-            modifier = Modifier.size(28.dp)
+            onCheckedChange = null,
+            enabled = enabled
         )
-        Spacer(modifier = Modifier.width(6.dp))
+        Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = label,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodyMedium,
             fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal,
             color = if (enabled) {
                 appColors.textPrimary
@@ -1015,108 +1442,6 @@ private fun BypassCheckboxRow(
                 appColors.textDisabled
             }
         )
-    }
-}
-
-@Composable
-private fun HomeSelectionCard(
-    content: @Composable ColumnScope.() -> Unit
-) {
-    GlassCardSurface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = GlassCardShape14
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            content = content
-        )
-    }
-}
-
-@Composable
-private fun HomeStatusRow(
-    icon: ImageVector,
-    title: String,
-    value: String,
-    subtitle: String,
-    isError: Boolean = false,
-    ready: Boolean,
-    isLoading: Boolean = false,
-    actionLabel: String,
-    enabled: Boolean,
-    onAction: () -> Unit,
-    modifier: Modifier = Modifier,
-    completed: Boolean = false,
-    titleGuideActive: Boolean = false,
-    titleGuideColor: Color = MaterialTheme.colorScheme.primary
-) {
-    Row(
-        modifier = modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (isLoading) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(20.dp),
-                strokeWidth = 2.dp
-            )
-        } else {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = when {
-                    isError -> MaterialTheme.colorScheme.error
-                    ready -> statusSuccessColor()
-                    else -> MaterialTheme.colorScheme.primary
-                },
-                modifier = Modifier.size(20.dp)
-            )
-        }
-        Spacer(modifier = Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                GuidedStepText(
-                    text = title,
-                    style = MaterialTheme.typography.labelSmall,
-                    defaultColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    guideActive = titleGuideActive,
-                    guideColor = titleGuideColor
-                )
-                if (completed) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Icon(
-                        imageVector = Icons.Rounded.CheckCircle,
-                        contentDescription = "$title selected",
-                        tint = statusSuccessColor(),
-                        modifier = Modifier.size(13.dp)
-                    )
-                }
-            }
-            Text(
-                text = value,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        Spacer(modifier = Modifier.width(6.dp))
-        TextButton(
-            onClick = onAction,
-            enabled = enabled,
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-            modifier = Modifier.height(32.dp)
-        ) {
-            Text(actionLabel, style = MaterialTheme.typography.labelMedium)
-        }
     }
 }
 
@@ -1156,20 +1481,20 @@ private fun UsbConnectionStatusDot(connected: Boolean) {
 
 @Composable
 private fun CompactHistoryRow(record: OperationHistoryRecord) {
-    val (statusColor, statusLabel) = historyStatusVisual(record.status)
+    val visual = historyStatusVisual(record.status)
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 7.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(statusColor)
+        StatusIconBadge(
+            icon = visual.icon,
+            tint = visual.color,
+            size = 32.dp,
+            iconSize = 18.dp
         )
-        Spacer(modifier = Modifier.width(10.dp))
+        Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = record.isoName,
@@ -1187,36 +1512,52 @@ private fun CompactHistoryRow(record: OperationHistoryRecord) {
             )
         }
         Spacer(modifier = Modifier.width(8.dp))
-        StatusPill(text = statusLabel, color = statusColor)
+        StatusPill(text = visual.label, color = visual.color)
     }
 }
 
+private data class HistoryStatusVisual(
+    val icon: ImageVector,
+    val color: Color,
+    val label: String,
+    val bannerTone: BannerTone
+)
+
+@Composable
+private fun historyStatusVisual(phase: WritePhase): HistoryStatusVisual = when (phase) {
+    WritePhase.COMPLETED -> HistoryStatusVisual(
+        icon = Icons.Rounded.CheckCircle,
+        color = statusSuccessColor(),
+        label = "COMPLETED",
+        bannerTone = BannerTone.SUCCESS
+    )
+    WritePhase.CANCELLED -> HistoryStatusVisual(
+        icon = Icons.Rounded.Cancel,
+        color = statusWarningColor(),
+        label = "CANCELLED",
+        bannerTone = BannerTone.WARNING
+    )
+    else -> HistoryStatusVisual(
+        icon = Icons.Rounded.ErrorOutline,
+        color = MaterialTheme.colorScheme.error,
+        label = "FAILED",
+        bannerTone = BannerTone.ERROR
+    )
+}
+
 /**
- * Persisted History Tab showing real completed, failed, and cancelled operations.
+ * Persisted History Tab showing real completed, failed, and cancelled operations
+ * using the same Home-style cards, status icons, detail rows, and result banners.
  */
 @Composable
 private fun HistoryTabContent(history: List<OperationHistoryRecord>) {
     if (history.isEmpty()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.History,
-                contentDescription = null,
-                modifier = Modifier.size(44.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text("No Operation History", style = MaterialTheme.typography.titleMedium)
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "Completed, cancelled, and failed USB writes will be logged here with measured transfer speeds.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+        ScreenColumn {
+            AppEmptyState(
+                icon = Icons.Rounded.History,
+                title = "No Operation History",
+                message = "Completed, cancelled, and failed USB writes will be logged here with measured transfer speeds.",
+                compact = false
             )
         }
         return
@@ -1224,86 +1565,89 @@ private fun HistoryTabContent(history: List<OperationHistoryRecord>) {
 
     val dateFormat = remember { SimpleDateFormat("MMM dd, HH:mm", Locale.US) }
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
+    ScreenLazyColumn {
+        item(key = "history_header") {
+            SectionHeader(title = "Operation History (${history.size})")
+        }
         items(history, key = { it.id }) { record ->
-            val (color, label) = historyStatusVisual(record.status)
-            GlassCardSurface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = GlassCardShape14
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = when (record.status) {
-                                    WritePhase.COMPLETED -> Icons.Rounded.CheckCircle
-                                    WritePhase.CANCELLED -> Icons.Rounded.Cancel
-                                    else -> Icons.Rounded.ErrorOutline
-                                },
-                                contentDescription = null,
-                                tint = color,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            StatusPill(text = label, color = color)
-                        }
-                        Text(
-                            text = dateFormat.format(Date(record.timestampMs)),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "${record.isoName} (${ByteUtils.formatBytes(record.isoSizeBytes)})",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "Target: ${record.driveName}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Avg Speed: ${ByteUtils.formatSpeed(record.averageSpeedBytesPerSec)} • " +
-                            "Duration: ${ByteUtils.formatDuration(record.durationMs / 1000L)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (record.summaryNote.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = record.summaryNote,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
+            HistoryRecordCard(record = record, dateFormat = dateFormat)
         }
     }
 }
 
 @Composable
-private fun historyStatusVisual(phase: WritePhase): Pair<Color, String> = when (phase) {
-    WritePhase.COMPLETED -> statusSuccessColor() to "COMPLETED"
-    WritePhase.CANCELLED -> statusWarningColor() to "CANCELLED"
-    else -> MaterialTheme.colorScheme.error to "FAILED"
+private fun HistoryRecordCard(
+    record: OperationHistoryRecord,
+    dateFormat: SimpleDateFormat
+) {
+    val visual = historyStatusVisual(record.status)
+    val isFailed = visual.bannerTone == BannerTone.ERROR
+    val resultMessage = record.summaryNote.ifBlank {
+        when (record.status) {
+            WritePhase.COMPLETED -> "Bootable USB created successfully."
+            WritePhase.CANCELLED -> "Write operation was cancelled."
+            else -> "Write operation failed."
+        }
+    }
+
+    AppCard(
+        accentBorderColor = if (isFailed) MaterialTheme.colorScheme.error else null
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top
+        ) {
+            StatusIconBadge(
+                icon = visual.icon,
+                tint = visual.color,
+                size = 32.dp,
+                iconSize = 18.dp
+            )
+            Spacer(modifier = Modifier.width(16.dp))
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = dateFormat.format(Date(record.timestampMs)),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = record.isoName,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            StatusPill(text = visual.label, color = visual.color)
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            DetailRow(label = "USB Drive", value = record.driveName)
+            DetailRow(label = "Size", value = ByteUtils.formatBytes(record.isoSizeBytes))
+            DetailRow(
+                label = "Transfer",
+                value = "${ByteUtils.formatSpeed(record.averageSpeedBytesPerSec)} • " +
+                    ByteUtils.formatDuration(record.durationMs / 1000L)
+            )
+        }
+
+        AppBanner(
+            message = resultMessage,
+            tone = visual.bannerTone,
+            icon = visual.icon,
+            rounded = true
+        )
+    }
 }
 
 /**
- * Compact, theme-aware Settings Tab organizing Appearance, Progress Bar Styles, Neon Customization,
- * USB Flashing & Integrity, Diagnostics, and Restore Defaults with minimal scrolling.
+ * Theme-aware Settings Tab matching Home screen cards, section headers, buttons, and spacing.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -1316,249 +1660,140 @@ private fun SettingsTabContent(
     onResetAllSettings: () -> Unit,
     onSetBufferOption: (WriteBufferOption) -> Unit,
     onSetVerifyAfterWrite: (Boolean) -> Unit,
+    onSetAutoEjectAfterWrite: (Boolean) -> Unit,
     onOpenLogs: () -> Unit,
     onOpenTechnicalGuide: () -> Unit
 ) {
     val isWriting = state.writeProgress.phase.isActive
-    val appColors = LocalAppColors.current
+    val isEjecting = state.ejectState.isEjecting
+    val controlsEnabled = !isWriting && !isEjecting
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        // 1. Appearance — compact full-width 3-button segmented selector
-        SettingsSection(title = "Appearance") {
+    ScreenColumn {
+        // 1. Appearance — Home-style option buttons inside a Home-style card
+        TitledCardSection(title = "Appearance") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 ThemeMode.entries.forEach { mode ->
-                    val selected = state.settings.themeMode == mode
-                    OutlinedButton(
+                    AppSelectableOptionButton(
+                        label = when (mode) {
+                            ThemeMode.SYSTEM -> "System"
+                            ThemeMode.LIGHT -> "Light"
+                            ThemeMode.DARK -> "Dark"
+                        },
+                        selected = state.settings.themeMode == mode,
                         onClick = { onSetThemeMode(mode) },
-                        shape = RoundedCornerShape(9.dp),
-                        border = BorderStroke(
-                            width = if (selected) 1.5.dp else 1.dp,
-                            color = if (selected) MaterialTheme.colorScheme.primary else appColors.borderSubtle
-                        ),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = if (selected) {
-                                if (appColors.isDark) {
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
-                                } else {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                }
-                            } else {
-                                appColors.surfaceInner
-                            },
-                            contentColor = if (selected) {
-                                if (appColors.isDark) GlassTextWhite else MaterialTheme.colorScheme.onPrimaryContainer
-                            } else {
-                                appColors.textSecondary
-                            }
-                        ),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(38.dp)
-                    ) {
-                        Text(
-                            text = when (mode) {
-                                ThemeMode.SYSTEM -> "System"
-                                ThemeMode.LIGHT -> "Light"
-                                ThemeMode.DARK -> "Dark"
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
             }
         }
 
-        // 2 & 3. Progress Bar Style (4 distinct styles) + Neon Customization
+        // 2 & 3. Progress Bar Style + Neon Customization
         CustomizationSettingsContent(
             savedCustomization = state.customization,
             onApplyCustomization = onApplyCustomization,
             onResetDefaults = onResetCustomization
         )
 
-        // 4. USB Flashing & Integrity (Buffer Size + Post-Write SHA-256 Verification)
-        SettingsSection(title = "USB Flashing & Integrity") {
-            Text(
-                text = "I/O Buffer Size",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium
-            )
-            Text(
-                text = "Auto picks optimal chunk size (256/128/64 KiB) for your USB port.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                WriteBufferOption.entries.forEach { option ->
-                    val selected = state.settings.bufferOption == option
-                    FilterChip(
-                        selected = selected,
-                        enabled = !isWriting,
-                        onClick = { onSetBufferOption(option) },
-                        label = {
-                            Text(
-                                text = if (option == WriteBufferOption.AUTO) "Auto" else option.label,
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    )
-                }
-            }
-
-            HorizontalDivider(
-                color = appColors.borderSubtle,
-                modifier = Modifier.padding(vertical = 6.dp)
-            )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(enabled = !isWriting) {
-                        onSetVerifyAfterWrite(!state.settings.verifyAfterWrite)
-                    }
-                    .padding(vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Verify SHA-256 After Writing",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "Read back written sectors over SCSI to verify bit-exact integrity.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-                Switch(
-                    checked = state.settings.verifyAfterWrite,
-                    enabled = !isWriting,
-                    onCheckedChange = onSetVerifyAfterWrite
+        // 4. USB Flashing & Integrity (Buffer Size + Post-Write SHA-256 Verification + Auto-Eject)
+        TitledCardSection(
+            title = "USB Flashing & Integrity",
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "I/O Buffer Size",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "Auto picks optimal chunk size (256/128/64 KiB) for your USB port.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                WriteBufferOption.entries.forEach { option ->
+                    AppSelectableOptionButton(
+                        label = if (option == WriteBufferOption.AUTO) "Auto" else option.label,
+                        selected = state.settings.bufferOption == option,
+                        onClick = { onSetBufferOption(option) },
+                        enabled = controlsEnabled,
+                        accessibilityDescription = option.label,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            AppDivider()
+
+            AppSwitchRow(
+                title = "Verify SHA-256 After Writing",
+                subtitle = "Read back written sectors over SCSI to verify bit-exact integrity.",
+                checked = state.settings.verifyAfterWrite,
+                enabled = controlsEnabled,
+                onCheckedChange = onSetVerifyAfterWrite
+            )
+
+            AppDivider()
+
+            AppSwitchRow(
+                title = stringResource(R.string.settings_auto_eject_title),
+                subtitle = stringResource(R.string.settings_auto_eject_subtitle),
+                checked = state.settings.autoEjectAfterWrite,
+                enabled = controlsEnabled,
+                onCheckedChange = onSetAutoEjectAfterWrite
+            )
         }
 
         // 5. Diagnostics & Help
-        SettingsSection(title = "Diagnostics & Help") {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(onClick = onOpenLogs)
-                    .padding(vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Terminal,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "USB / SCSI Diagnostic Log",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium
-                    )
-                    DiagnosticLogCountText(logsFlow = logsFlow)
-                }
-            }
-            HorizontalDivider(color = appColors.borderSubtle)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(onClick = onOpenTechnicalGuide)
-                    .padding(vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Info,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Technical & Compatibility Guide",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "USB Host API, root notes, Windows & Linux boot details",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
+        TitledCardSection(
+            title = "Diagnostics & Help",
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            DiagnosticLogRow(
+                logsFlow = logsFlow,
+                onOpenLogs = onOpenLogs
+            )
+            AppDivider()
+            AppListRow(
+                icon = Icons.Rounded.Info,
+                title = "Technical & Compatibility Guide",
+                subtitle = "USB Host API, root notes, Windows & Linux boot details",
+                onClick = onOpenTechnicalGuide
+            )
         }
 
         // 6. Restore Defaults — confirmation handled by the caller
-        SettingsSection(title = "Restore Defaults") {
+        TitledCardSection(
+            title = "Restore Defaults",
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
             Text(
                 text = "Reset all preferences to defaults. ISO files, USB data, and history are kept.",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(modifier = Modifier.height(8.dp))
-            OutlinedButton(
+            AppOutlineButton(
+                text = "RESTORE DEFAULTS",
                 onClick = onResetAllSettings,
                 enabled = !isWriting,
-                shape = RoundedCornerShape(10.dp),
-                border = BorderStroke(
-                    width = 1.dp,
-                    color = if (isWriting) appColors.borderSubtle else MaterialTheme.colorScheme.primary
-                ),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = if (isWriting) appColors.textDisabled else MaterialTheme.colorScheme.primary,
-                    disabledContentColor = appColors.textDisabled
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(40.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Restore,
-                    contentDescription = null,
-                    modifier = Modifier.size(17.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "RESTORE DEFAULTS",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+                icon = Icons.Rounded.Restore,
+                compactTextStyle = true
+            )
         }
 
-        // Compact Security Footer
+        // Security Footer
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 2.dp),
+                .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -1567,10 +1802,10 @@ private fun SettingsTabContent(
                 tint = statusSuccessColor(),
                 modifier = Modifier.size(16.dp)
             )
-            Spacer(modifier = Modifier.width(6.dp))
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = "${stringResource(id = R.string.app_name)} v${BuildConfig.VERSION_NAME} • Internal storage is never exposed or writable.",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -1578,45 +1813,15 @@ private fun SettingsTabContent(
 }
 
 @Composable
-private fun DiagnosticLogCountText(logsFlow: StateFlow<List<LogEntry>>) {
-    val logs by logsFlow.collectAsStateWithLifecycle()
-    Text(
-        text = "${logs.size} event${if (logs.size == 1) "" else "s"} captured",
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
-    )
-}
-
-@Composable
-internal fun SettingsSection(
-    title: String,
-    headerAction: (@Composable () -> Unit)? = null,
-    content: @Composable ColumnScope.() -> Unit
+private fun DiagnosticLogRow(
+    logsFlow: StateFlow<List<LogEntry>>,
+    onOpenLogs: () -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary
-            )
-            headerAction?.invoke()
-        }
-        GlassCardSurface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = GlassCardShape14
-        ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                content = content
-            )
-        }
-    }
+    val logs by logsFlow.collectAsStateWithLifecycle()
+    AppListRow(
+        icon = Icons.Rounded.Terminal,
+        title = "USB / SCSI Diagnostic Log",
+        subtitle = "${logs.size} event${if (logs.size == 1) "" else "s"} captured",
+        onClick = onOpenLogs
+    )
 }

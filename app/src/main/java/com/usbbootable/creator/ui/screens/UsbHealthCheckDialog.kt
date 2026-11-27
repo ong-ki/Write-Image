@@ -7,11 +7,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Cancel
@@ -22,7 +22,6 @@ import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -32,6 +31,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.usbbootable.creator.core.usb.IntegrityResult
@@ -56,6 +56,13 @@ fun UsbHealthCheckDialog(
     val isRunning = progress.phase.isActive
     val report = progress.report
 
+    val statusTone = when {
+        isRunning -> BannerTone.INFO
+        progress.phase == UsbHealthPhase.CANCELLED -> BannerTone.WARNING
+        report?.status == UsbHealthStatus.HEALTHY -> BannerTone.SUCCESS
+        report?.status == UsbHealthStatus.WARNING -> BannerTone.WARNING
+        else -> BannerTone.ERROR
+    }
     val statusColor = when {
         isRunning -> MaterialTheme.colorScheme.primary
         progress.phase == UsbHealthPhase.CANCELLED -> statusWarningColor()
@@ -83,22 +90,17 @@ fun UsbHealthCheckDialog(
             )
         },
         title = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "USB Health Check",
-                    style = MaterialTheme.typography.titleLarge
-                )
-            }
+            Text(
+                text = "USB Health Check",
+                style = MaterialTheme.typography.titleLarge
+            )
         },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 if (progress.driveName.isNotBlank()) {
                     Text(
@@ -150,11 +152,11 @@ fun UsbHealthCheckDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else if (report != null) {
-                    // Concise Diagnostic Report Header
+                    val bannerPalette = bannerColors(statusTone)
                     Surface(
-                        color = statusColor.copy(alpha = 0.14f),
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.45f)),
+                        color = bannerPalette.container,
+                        shape = HomeControlShape,
+                        border = BorderStroke(1.dp, bannerPalette.border),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -168,7 +170,7 @@ fun UsbHealthCheckDialog(
                                 text = "STATUS: ${report.status.label}",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold,
-                                color = statusColor,
+                                color = bannerPalette.content,
                                 modifier = Modifier.weight(1f)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
@@ -176,18 +178,17 @@ fun UsbHealthCheckDialog(
                                 text = ByteUtils.formatElapsedClock(report.elapsedSeconds),
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = bannerPalette.content
                             )
                         }
                     }
 
-                    // Key Diagnostic Metrics
                     DiagnosticMetricRow(
                         label = "Actual Capacity",
                         value = ByteUtils.formatDecimalCapacity(report.reportedCapacityBytes),
                         detail = report.capacityNote
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                    AppDivider()
 
                     DiagnosticMetricRow(
                         label = "Sequential Read Speed",
@@ -198,7 +199,7 @@ fun UsbHealthCheckDialog(
                         value = report.sequentialWriteBytesPerSec?.let { ByteUtils.formatSpeed(it) }
                             ?: "Skipped (Read-Only)"
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                    AppDivider()
 
                     DiagnosticMetricRow(
                         label = "SHA-256 Verification",
@@ -210,7 +211,7 @@ fun UsbHealthCheckDialog(
                         },
                         detail = report.integrityNote
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                    AppDivider()
 
                     DiagnosticMetricRow(
                         label = "USB I/O Errors",
@@ -225,7 +226,7 @@ fun UsbHealthCheckDialog(
                     )
 
                     if (report.summaryNotes.isNotEmpty()) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                        AppDivider()
                         report.summaryNotes.forEach { note ->
                             Text(
                                 text = "• $note",
@@ -242,20 +243,12 @@ fun UsbHealthCheckDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
-                    // Cancelled or pre-session error state
-                    Surface(
-                        color = statusColor.copy(alpha = 0.14f),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = progress.errorMessage
-                                ?: progress.statusMessage.ifBlank { "USB health check ended." },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.padding(10.dp)
-                        )
-                    }
+                    AppBanner(
+                        message = progress.errorMessage
+                            ?: progress.statusMessage.ifBlank { "USB health check ended." },
+                        tone = statusTone,
+                        rounded = true
+                    )
                     Text(
                         text = "Elapsed: ${ByteUtils.formatElapsedClock(progress.elapsedSeconds)}",
                         style = MaterialTheme.typography.labelSmall,
@@ -268,23 +261,32 @@ fun UsbHealthCheckDialog(
             if (isRunning) {
                 OutlinedButton(
                     onClick = onCancel,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    shape = HomeControlShape,
+                    border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.error),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.heightIn(min = 48.dp)
                 ) {
                     Icon(Icons.Rounded.Cancel, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("CANCEL")
+                    Text("CANCEL", style = MaterialTheme.typography.labelLarge)
                 }
             } else {
-                Button(onClick = onDismiss) {
-                    Text("CLOSE")
+                Button(
+                    onClick = onDismiss,
+                    shape = HomeControlShape,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
+                    Text("CLOSE", style = MaterialTheme.typography.labelLarge)
                 }
             }
         },
         dismissButton = {
             if (!isRunning) {
-                TextButton(onClick = onRerun) {
-                    Text("RUN AGAIN")
+                TextButton(
+                    onClick = onRerun,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
+                    Text("RUN AGAIN", style = MaterialTheme.typography.labelLarge)
                 }
             }
         }
@@ -295,7 +297,7 @@ fun UsbHealthCheckDialog(
 private fun DiagnosticMetricRow(
     label: String,
     value: String,
-    valueColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+    valueColor: Color = MaterialTheme.colorScheme.onSurface,
     detail: String? = null
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {

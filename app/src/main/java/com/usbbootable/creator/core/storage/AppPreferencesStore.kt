@@ -30,6 +30,7 @@ data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val bufferOption: WriteBufferOption = WriteBufferOption.AUTO,
     val verifyAfterWrite: Boolean = true,
+    val autoEjectAfterWrite: Boolean = false,
     val windowsBypassOptions: WindowsBypassOptions = WindowsBypassOptions.NONE
 )
 
@@ -79,6 +80,11 @@ class AppPreferencesStore(context: Context) {
         prefs.edit { putBoolean(KEY_VERIFY_AFTER_WRITE, enabled) }
     }
 
+    fun setAutoEjectAfterWrite(enabled: Boolean) {
+        _settings.update { it.copy(autoEjectAfterWrite = enabled) }
+        prefs.edit { putBoolean(KEY_AUTO_EJECT_AFTER_WRITE, enabled) }
+    }
+
     fun setWindowsBypassOptions(options: WindowsBypassOptions) {
         _settings.update { it.copy(windowsBypassOptions = options) }
         prefs.edit {
@@ -96,6 +102,30 @@ class AppPreferencesStore(context: Context) {
             }
             val normalized = if (entry.id == uniqueId) entry else entry.copy(id = uniqueId)
             val updated = (listOf(normalized) + _history.value).take(MAX_HISTORY_ITEMS)
+            _history.value = updated
+            saveHistory(updated)
+        }
+    }
+
+    fun appendSummaryNoteToLatestCompletedWrite(driveName: String, extraNote: String) {
+        if (extraNote.isBlank()) return
+        synchronized(historyLock) {
+            val current = _history.value
+            val idx = current.indexOfFirst {
+                it.status == WritePhase.COMPLETED && it.driveName == driveName
+            }
+            if (idx < 0) return
+            val existing = current[idx]
+            val merged = if (existing.summaryNote.isBlank()) {
+                extraNote
+            } else if (existing.summaryNote.contains(extraNote)) {
+                existing.summaryNote
+            } else {
+                "${existing.summaryNote} | $extraNote"
+            }
+            val updated = current.toMutableList().apply {
+                this[idx] = existing.copy(summaryNote = merged)
+            }
             _history.value = updated
             saveHistory(updated)
         }
@@ -119,6 +149,7 @@ class AppPreferencesStore(context: Context) {
             putString(KEY_THEME_MODE, defaults.themeMode.name)
             putString(KEY_BUFFER_OPTION, defaults.bufferOption.name)
             putBoolean(KEY_VERIFY_AFTER_WRITE, defaults.verifyAfterWrite)
+            putBoolean(KEY_AUTO_EJECT_AFTER_WRITE, defaults.autoEjectAfterWrite)
             putBoolean(KEY_BYPASS_TPM, defaults.windowsBypassOptions.bypassTpm)
             putBoolean(KEY_BYPASS_SECURE_BOOT, defaults.windowsBypassOptions.bypassSecureBoot)
             putBoolean(KEY_BYPASS_RAM, defaults.windowsBypassOptions.bypassRam)
@@ -132,6 +163,7 @@ class AppPreferencesStore(context: Context) {
         } ?: ThemeMode.SYSTEM
         val buffer = WriteBufferOption.fromName(prefs.getString(KEY_BUFFER_OPTION, WriteBufferOption.AUTO.name))
         val verify = prefs.getBoolean(KEY_VERIFY_AFTER_WRITE, true)
+        val autoEject = prefs.getBoolean(KEY_AUTO_EJECT_AFTER_WRITE, false)
         val bypass = WindowsBypassOptions(
             bypassTpm = prefs.getBoolean(KEY_BYPASS_TPM, false),
             bypassSecureBoot = prefs.getBoolean(KEY_BYPASS_SECURE_BOOT, false),
@@ -142,6 +174,7 @@ class AppPreferencesStore(context: Context) {
             themeMode = theme,
             bufferOption = buffer,
             verifyAfterWrite = verify,
+            autoEjectAfterWrite = autoEject,
             windowsBypassOptions = bypass
         )
     }
@@ -206,6 +239,7 @@ class AppPreferencesStore(context: Context) {
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_BUFFER_OPTION = "buffer_option"
         private const val KEY_VERIFY_AFTER_WRITE = "verify_after_write"
+        private const val KEY_AUTO_EJECT_AFTER_WRITE = "auto_eject_after_write"
         private const val KEY_BYPASS_TPM = "win_bypass_tpm"
         private const val KEY_BYPASS_SECURE_BOOT = "win_bypass_secure_boot"
         private const val KEY_BYPASS_RAM = "win_bypass_ram"

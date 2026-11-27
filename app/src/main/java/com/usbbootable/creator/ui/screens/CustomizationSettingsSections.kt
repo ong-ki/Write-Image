@@ -8,27 +8,23 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -42,6 +38,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -58,8 +58,6 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-private val StyleTileShape = RoundedCornerShape(10.dp)
-private val PresetTileShape = RoundedCornerShape(8.dp)
 private val HueSpectrumColors = listOf(
     Color(0xFFFF0000),
     Color(0xFFFFFF00),
@@ -91,54 +89,43 @@ fun CustomizationSettingsContent(
         onApplyCustomization(clean)
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        // 1. Progress Bar Style Selection (4 visually distinct styles in a compact 2x2 grid)
-        SettingsSection(title = "Progress Bar Style") {
-            val styles = ProgressBarStyle.entries
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                styles.chunked(2).forEach { rowStyles ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        rowStyles.forEach { style ->
-                            ProgressBarStyleTile(
-                                style = style,
-                                selected = draft.progressBarStyle == style,
-                                neonTheme = neon,
-                                onClick = {
-                                    commit(draft.copy(progressBarStyle = style))
-                                },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        // 1. Progress Bar Style Selection (4 visually distinct styles in a 2x2 grid)
+        TitledCardSection(
+            title = "Progress Bar Style",
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            ProgressBarStyle.entries.chunked(2).forEach { rowStyles ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    rowStyles.forEach { style ->
+                        ProgressBarStyleTile(
+                            style = style,
+                            selected = draft.progressBarStyle == style,
+                            neonTheme = neon,
+                            onClick = {
+                                commit(draft.copy(progressBarStyle = style))
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
             }
         }
 
-        // 2. Neon Customization (compact toggles, 3x2 preset grid, custom HSV & glow sliders)
-        SettingsSection(
+        // 2. Neon Customization (switches, 3x2 preset grid, custom HSV & glow sliders)
+        TitledCardSection(
             title = "Neon Customization",
-            headerAction = {
-                if (isCustomModified) {
-                    TextButton(
-                        onClick = {
-                            draft = AppearanceCustomization.DEFAULT
-                            onResetDefaults()
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        modifier = Modifier.height(26.dp)
-                    ) {
-                        Text(
-                            text = "Reset",
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                    }
-                }
-            }
+            actionLabel = if (isCustomModified) "Reset" else null,
+            onAction = {
+                draft = AppearanceCustomization.DEFAULT
+                onResetDefaults()
+            },
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            CustomizationSwitchRow(
+            AppSwitchRow(
                 title = "Enable Neon Effects",
                 subtitle = "Custom accent colors and glow styling",
                 checked = neon.neonEnabled,
@@ -148,12 +135,9 @@ fun CustomizationSettingsContent(
                 }
             )
 
-            HorizontalDivider(
-                color = appColors.borderSubtle,
-                modifier = Modifier.padding(vertical = 4.dp)
-            )
+            AppDivider()
 
-            CustomizationSwitchRow(
+            AppSwitchRow(
                 title = "Background Glow",
                 subtitle = "Subtle ambient backdrop lighting",
                 checked = neon.backgroundGlowEnabled,
@@ -163,98 +147,89 @@ fun CustomizationSettingsContent(
                 }
             )
 
-            HorizontalDivider(
-                color = appColors.borderSubtle,
-                modifier = Modifier.padding(vertical = 6.dp)
-            )
+            AppDivider()
 
-            Text(
-                text = "Presets",
-                style = MaterialTheme.typography.labelMedium,
-                color = appColors.textPrimary
-            )
-            Spacer(modifier = Modifier.height(6.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Presets",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                NeonColorPresets.all.chunked(3).forEach { rowPresets ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        rowPresets.forEach { preset ->
-                            val isPresetSelected = neon.primaryColorArgb == preset.primaryArgb &&
-                                neon.secondaryColorArgb == preset.secondaryArgb
-                            NeonPresetTile(
-                                preset = preset,
-                                selected = isPresetSelected,
-                                enabled = neon.neonEnabled,
-                                onClick = {
-                                    commit(draft.copy(neonTheme = neon.withPreset(preset)))
-                                },
-                                modifier = Modifier.weight(1f)
-                            )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    NeonColorPresets.all.chunked(3).forEach { rowPresets ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowPresets.forEach { preset ->
+                                val isPresetSelected = neon.primaryColorArgb == preset.primaryArgb &&
+                                    neon.secondaryColorArgb == preset.secondaryArgb
+                                NeonPresetTile(
+                                    preset = preset,
+                                    selected = isPresetSelected,
+                                    enabled = neon.neonEnabled,
+                                    onClick = {
+                                        commit(draft.copy(neonTheme = neon.withPreset(preset)))
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            HorizontalDivider(
-                color = appColors.borderSubtle,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
+            AppDivider()
 
-            Text(
-                text = "Custom Colors",
-                style = MaterialTheme.typography.labelMedium,
-                color = appColors.textPrimary
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                ColorSlotChip(
-                    label = "Primary",
-                    argb = neon.primaryColorArgb,
-                    selected = editingSlot == 0,
-                    enabled = neon.neonEnabled,
-                    onClick = { editingSlot = 0 },
-                    modifier = Modifier.weight(1f)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Custom Colors",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                ColorSlotChip(
-                    label = "Secondary",
-                    argb = neon.secondaryColorArgb,
-                    selected = editingSlot == 1,
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ColorSlotChip(
+                        label = "Primary",
+                        argb = neon.primaryColorArgb,
+                        selected = editingSlot == 0,
+                        enabled = neon.neonEnabled,
+                        onClick = { editingSlot = 0 },
+                        modifier = Modifier.weight(1f)
+                    )
+                    ColorSlotChip(
+                        label = "Secondary",
+                        argb = neon.secondaryColorArgb,
+                        selected = editingSlot == 1,
+                        enabled = neon.neonEnabled,
+                        onClick = { editingSlot = 1 },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                val activeArgb = if (editingSlot == 0) neon.primaryColorArgb else neon.secondaryColorArgb
+                InlineHsvColorPicker(
+                    argb = activeArgb,
                     enabled = neon.neonEnabled,
-                    onClick = { editingSlot = 1 },
-                    modifier = Modifier.weight(1f)
+                    onColorChanged = { updatedArgb ->
+                        val updatedNeon = if (editingSlot == 0) {
+                            neon.copy(primaryColorArgb = updatedArgb)
+                        } else {
+                            neon.copy(secondaryColorArgb = updatedArgb)
+                        }
+                        draft = draft.copy(neonTheme = updatedNeon)
+                    },
+                    onColorCommitted = {
+                        onApplyCustomization(draft.normalized())
+                    }
                 )
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
-
-            val activeArgb = if (editingSlot == 0) neon.primaryColorArgb else neon.secondaryColorArgb
-            InlineHsvColorPicker(
-                argb = activeArgb,
-                enabled = neon.neonEnabled,
-                onColorChanged = { updatedArgb ->
-                    val updatedNeon = if (editingSlot == 0) {
-                        neon.copy(primaryColorArgb = updatedArgb)
-                    } else {
-                        neon.copy(secondaryColorArgb = updatedArgb)
-                    }
-                    draft = draft.copy(neonTheme = updatedNeon)
-                },
-                onColorCommitted = {
-                    onApplyCustomization(draft.normalized())
-                }
-            )
-
-            HorizontalDivider(
-                color = appColors.borderSubtle,
-                modifier = Modifier.padding(vertical = 6.dp)
-            )
+            AppDivider()
 
             LabeledSlider(
                 label = "Glow Intensity",
@@ -308,22 +283,26 @@ private fun ProgressBarStyleTile(
 
     Surface(
         color = if (selected) {
-            accent.copy(alpha = if (appColors.isDark) 0.16f else 0.11f)
+            MaterialTheme.colorScheme.primaryContainer
         } else {
             appColors.surfaceInner
         },
-        shape = StyleTileShape,
+        shape = HomeControlShape,
         border = BorderStroke(
-            width = if (selected) 1.5.dp else 1.dp,
-            color = if (selected) accent else appColors.borderSubtle
+            width = if (selected) 2.dp else 1.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary else appColors.borderSubtle
         ),
         modifier = modifier
-            .clip(StyleTileShape)
+            .clip(HomeControlShape)
             .clickable(onClick = onClick)
+            .semantics {
+                role = Role.RadioButton
+                this.selected = selected
+            }
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -334,7 +313,11 @@ private fun ProgressBarStyleTile(
                     text = style.label,
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = appColors.textPrimary,
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        appColors.textPrimary
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
@@ -345,7 +328,7 @@ private fun ProgressBarStyleTile(
                         imageVector = Icons.Rounded.CheckCircle,
                         contentDescription = "Selected",
                         tint = accent,
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
@@ -361,54 +344,15 @@ private fun ProgressBarStyleTile(
             Text(
                 text = shortCaption,
                 style = MaterialTheme.typography.labelSmall,
-                color = appColors.textSecondary,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                } else {
+                    appColors.textSecondary
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
-    }
-}
-
-@Composable
-private fun CustomizationSwitchRow(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    enabled: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    val appColors = LocalAppColors.current
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(enabled = enabled) { onCheckedChange(!checked) }
-            .padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-                color = if (enabled) appColors.textPrimary else appColors.textDisabled,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.labelSmall,
-                color = if (enabled) appColors.textSecondary else appColors.textDisabled,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        Spacer(modifier = Modifier.width(10.dp))
-        Switch(
-            checked = checked,
-            enabled = enabled,
-            onCheckedChange = onCheckedChange
-        )
     }
 }
 
@@ -425,24 +369,28 @@ private fun NeonPresetTile(
     val secondary = adaptAccentForSurface(Color(preset.secondaryArgb), appColors.isDark)
     Surface(
         color = if (selected && enabled) {
-            primary.copy(alpha = if (appColors.isDark) 0.22f else 0.14f)
+            MaterialTheme.colorScheme.primaryContainer
         } else {
             appColors.surfaceInner
         },
-        shape = PresetTileShape,
+        shape = HomeControlShape,
         border = BorderStroke(
-            width = if (selected && enabled) 1.5.dp else 1.dp,
-            color = if (selected && enabled) primary else appColors.borderSubtle
+            width = if (selected && enabled) 2.dp else 1.dp,
+            color = if (selected && enabled) MaterialTheme.colorScheme.primary else appColors.borderSubtle
         ),
         modifier = modifier
-            .height(36.dp)
-            .clip(PresetTileShape)
+            .heightIn(min = 48.dp)
+            .clip(HomeControlShape)
             .clickable(enabled = enabled, onClick = onClick)
+            .semantics {
+                role = Role.RadioButton
+                this.selected = selected
+            }
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 7.dp),
+                .padding(horizontal = 8.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
@@ -452,14 +400,14 @@ private fun NeonPresetTile(
                     .clip(CircleShape)
                     .background(if (enabled) primary else appColors.textDisabled)
             )
-            Spacer(modifier = Modifier.width(2.dp))
+            Spacer(modifier = Modifier.width(3.dp))
             Box(
                 modifier = Modifier
                     .size(8.dp)
                     .clip(CircleShape)
                     .background(if (enabled) secondary else appColors.textDisabled)
             )
-            Spacer(modifier = Modifier.width(5.dp))
+            Spacer(modifier = Modifier.width(6.dp))
             val shortName = when (preset.id) {
                 "cyber_blue" -> "Blue"
                 "electric_purple" -> "Purple"
@@ -471,11 +419,11 @@ private fun NeonPresetTile(
             }
             Text(
                 text = shortName,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = if (selected && enabled) FontWeight.Bold else FontWeight.Medium,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (selected && enabled) FontWeight.SemiBold else FontWeight.Medium,
                 color = when {
                     !enabled -> appColors.textDisabled
-                    selected -> appColors.textPrimary
+                    selected -> MaterialTheme.colorScheme.onPrimaryContainer
                     else -> appColors.textSecondary
                 },
                 maxLines = 1,
@@ -496,25 +444,29 @@ private fun ColorSlotChip(
 ) {
     val appColors = LocalAppColors.current
     val color = Color(argb)
-    val borderAccent = adaptAccentForSurface(color, appColors.isDark)
     val hex = String.format(Locale.US, "#%06X", (argb and 0xFFFFFFL))
     Surface(
         color = if (selected && enabled) {
-            borderAccent.copy(alpha = if (appColors.isDark) 0.18f else 0.12f)
+            MaterialTheme.colorScheme.primaryContainer
         } else {
             appColors.surfaceInner
         },
-        shape = RoundedCornerShape(9.dp),
+        shape = HomeControlShape,
         border = BorderStroke(
-            width = if (selected && enabled) 1.5.dp else 1.dp,
-            color = if (selected && enabled) borderAccent else appColors.borderSubtle
+            width = if (selected && enabled) 2.dp else 1.dp,
+            color = if (selected && enabled) MaterialTheme.colorScheme.primary else appColors.borderSubtle
         ),
         modifier = modifier
-            .clip(RoundedCornerShape(9.dp))
+            .heightIn(min = 48.dp)
+            .clip(HomeControlShape)
             .clickable(enabled = enabled, onClick = onClick)
+            .semantics {
+                role = Role.RadioButton
+                this.selected = selected
+            }
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
@@ -528,16 +480,24 @@ private fun ColorSlotChip(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = label,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (enabled) appColors.textPrimary else appColors.textDisabled,
+                    color = when {
+                        !enabled -> appColors.textDisabled
+                        selected -> MaterialTheme.colorScheme.onPrimaryContainer
+                        else -> appColors.textPrimary
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = hex,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (enabled) appColors.textSecondary else appColors.textDisabled,
+                    color = when {
+                        !enabled -> appColors.textDisabled
+                        selected -> MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                        else -> appColors.textSecondary
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -560,7 +520,7 @@ private fun InlineHsvColorPicker(
     val value = hsv[2].coerceIn(0.25f, 1f)
     val currentColor = adaptAccentForSurface(Color(argb), appColors.isDark)
 
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,

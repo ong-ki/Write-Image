@@ -5,10 +5,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,7 +49,7 @@ fun TechnicalGuideDialog(onDismiss: () -> Unit) {
                         "(INQUIRY, READ CAPACITY, READ(10/16), WRITE(10/16), SYNCHRONIZE CACHE) directly to the USB flash drive."
                 )
 
-                HorizontalDivider()
+                AppDivider()
 
                 GuideSection(
                     title = "2. Android USB Host Limitations & Root Notes",
@@ -62,7 +62,7 @@ fun TechnicalGuideDialog(onDismiss: () -> Unit) {
                         "• Internal Android storage is NEVER exposed through UsbManager, providing hardware-level protection against overwriting your phone."
                 )
 
-                HorizontalDivider()
+                AppDivider()
 
                 GuideSection(
                     title = "3. Linux Hybrid ISOs & Raw Images (.iso / .img)",
@@ -71,7 +71,7 @@ fun TechnicalGuideDialog(onDismiss: () -> Unit) {
                         "and verified via full SCSI read-back SHA-256. Bootable on BIOS and/or UEFI PCs depending on the distro."
                 )
 
-                HorizontalDivider()
+                AppDivider()
 
                 GuideSection(
                     title = "4. Microsoft Windows 10 / 11 ISOs (UEFI Support)",
@@ -84,7 +84,7 @@ fun TechnicalGuideDialog(onDismiss: () -> Unit) {
                         "• Important: Target PC must boot in UEFI mode (Legacy BIOS / CSM is not supported for Windows extraction)."
                 )
 
-                HorizontalDivider()
+                AppDivider()
 
                 GuideSection(
                     title = "5. Non-Hybrid Optical ISOs",
@@ -95,8 +95,11 @@ fun TechnicalGuideDialog(onDismiss: () -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("CLOSE")
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
+                Text("CLOSE", style = MaterialTheme.typography.labelLarge)
             }
         }
     )

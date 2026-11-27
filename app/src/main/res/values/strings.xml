@@ -3,4 +3,49 @@
     <string name="app_name">Write-Image</string>
     <string name="notification_channel_name">USB Flashing Progress</string>
     <string name="notification_channel_desc">Shows real-time USB writing and verification progress</string>
+
+    <string name="action_eject_usb">Eject USB</string>
+    <string name="eject_status_ejecting">Ejecting...</string>
+    <string name="eject_banner_progress">Flushing cache and safely ejecting %1$s...</string>
+    <string name="eject_banner_safe_to_remove">Safe to remove your USB.</string>
+    <string name="eject_banner_all_commands_failed_warning">Ejected. If your USB was just written, it\'s safe to remove.</string>
+    <string name="eject_banner_failed">%1$s</string>
+    <string name="eject_banner_failed_generic">Unable to open the USB drive to eject.</string>
+    <string name="eject_banner_unplugged_warning">USB drive was unplugged before eject completed. Data or cache may not have finished flushing.</string>
+    <string name="eject_action_retry">Retry</string>
+    <string name="eject_action_details">Details</string>
+    <string name="eject_action_close">Close</string>
+    <string name="eject_action_dismiss">Dismiss</string>
+    <string name="eject_details_title">Eject Details</string>
+    <string name="eject_details_copy">Copy</string>
+    <string name="eject_details_copied">Copied</string>
+    <string name="eject_result_hint_before">Safely eject or unplug the drive before using it.</string>
+    <string name="eject_result_hint_after">Drive was safely ejected and can now be unplugged.</string>
+
+    <string name="eject_error_no_drive">No USB drive is connected to eject.</string>
+    <string name="eject_error_write_active">Cannot eject while a USB write operation is active.</string>
+    <string name="eject_error_no_permission">USB permission is required before ejecting this drive.</string>
+    <string name="eject_error_unsupported_transport">This USB drive cannot be ejected over BOT SCSI.</string>
+    <string name="eject_error_busy">USB drive is currently busy with another operation.</string>
+    <string name="eject_error_open_connection">Unable to open USB device connection.</string>
+    <string name="eject_error_claim_interface">Unable to claim the USB drive for eject.</string>
+    <string name="eject_error_sync_cache">Failed to flush USB drive write cache.</string>
+
+    <string name="usb_disconnected_during_write">USB drive disconnected. The write was aborted; the drive may contain partial data.</string>
+
+    <string name="settings_auto_eject_title">Eject automatically after write</string>
+    <string name="settings_auto_eject_subtitle">Flush cache and safely eject the USB drive after writing completes.</string>
+
+    <string name="cd_eject_usb">Safely eject connected USB drive</string>
+    <string name="cd_eject_status_success">Safe eject completed</string>
+    <string name="cd_eject_status_error">Safe eject failed</string>
+    <string name="cd_eject_status_warning">USB unplugged before eject completed</string>
+
+    <string name="notification_bootable_usb_ready">Bootable USB Ready</string>
+    <string name="notification_usb_creation_cancelled">USB Creation Cancelled</string>
+    <string name="notification_usb_creation_failed">USB Creation Failed</string>
+    <string name="notification_auto_eject_ready">%1$s Safe to remove your USB.</string>
+    <string name="notification_auto_eject_warning">%1$s Ejected. If your USB was just written, it\'s safe to remove.</string>
+    <string name="notification_auto_eject_failed">%1$s %2$s</string>
+    <string name="notification_auto_eject_unplugged">Write finished, but the USB drive was unplugged before auto-eject completed.</string>
 </resources>

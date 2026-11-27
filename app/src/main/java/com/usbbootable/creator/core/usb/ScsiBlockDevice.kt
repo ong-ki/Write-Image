@@ -17,7 +17,7 @@ import java.util.concurrent.CancellationException
  */
 class ScsiBlockDevice(
     private val transport: UsbBotTransport,
-    private val lun: Int = 0,
+    val lun: Int = 0,
     private val logger: OperationLogger? = null,
     maxTransferBytes: Int = DEFAULT_MAX_TRANSFER_BYTES,
     private val isCancelled: () -> Boolean = { false },
@@ -586,6 +586,300 @@ class ScsiBlockDevice(
         }
     }
 
+    fun hasBadBotState(): Boolean = transport.isBotStateBad
+
+    /**
+     * Best-effort safe eject sequence:
+     * 1. If BOT state is bad (prior CSW error), performs BOT Reset Recovery before the first command.
+     * 2. SYNCHRONIZE CACHE (10) (try once) -> on failure, clears halt on both bulk endpoints,
+     *    sends REQUEST SENSE (ignoring result), logs diagnostics, and continues.
+     * 3. TEST UNIT READY -> logs diagnostics on failure and continues.
+     * 4. START STOP UNIT (LOEJ=1, START=0, try once) -> logs diagnostics on failure and continues.
+     *
+     * Never fails eject due to SCSI/USB command failures; only [CancellationException] and
+     * [UsbDisconnectedException] propagate.
+     */
+    @Throws(CancellationException::class, UsbDisconnectedException::class)
+    fun ejectUnit(
+        forceInitialBotReset: Boolean = false,
+        preLogLines: List<String> = emptyList()
+    ): UsbEjectResult {
+        if (closed) throw UsbStorageException("USB block device is closed.")
+        if (isCancelled()) throw CancellationException("USB eject cancelled.")
+
+        val logLines = preLogLines.toMutableList()
+        val diagnostics = mutableListOf<ScsiCommandDiagnostic>()
+
+        if (transport.isBotStateBad || forceInitialBotReset) {
+            logger?.warn(TAG, "BOT state is bad (CSW error); running BOT Reset Recovery before eject")
+            try {
+                val rec = transport.resetRecoveryForBadState()
+                val msg = "Pre-eject ${rec.describe()}"
+                logLines += msg
+                logger?.info(TAG, msg)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: UsbDisconnectedException) {
+                throw e
+            } catch (e: Exception) {
+                val msg = "Pre-eject BOT Reset Recovery error (ignored): ${e.message ?: e::class.simpleName}"
+                logLines += msg
+                logger?.warn(TAG, msg)
+            }
+        }
+
+        val syncSucceeded = executeEjectSyncCacheOnce(logLines, diagnostics)
+        val turSucceeded = executeEjectTestUnitReady(logLines, diagnostics)
+        val startStopSucceeded = executeEjectStartStopOnce(logLines, diagnostics)
+
+        return UsbEjectResult(
+            syncCacheSucceeded = syncSucceeded,
+            testUnitReadySucceeded = turSucceeded,
+            startStopUnitSucceeded = startStopSucceeded,
+            diagnostics = diagnostics.toList(),
+            logText = logLines.joinToString("\n")
+        )
+    }
+
+    private fun executeEjectSyncCacheOnce(
+        logLines: MutableList<String>,
+        diagnostics: MutableList<ScsiCommandDiagnostic>
+    ): Boolean {
+        if (isCancelled()) throw CancellationException("USB eject cancelled.")
+        return try {
+            val result = transport.executeCommand(
+                lun = lun,
+                cdb = ScsiCommandSet.synchronizeCache10(),
+                direction = BotDirection.NONE,
+                commandName = "SYNCHRONIZE_CACHE_10(0x35)",
+                timeoutMs = EJECT_COMMAND_TIMEOUT_MS
+            )
+            if (result.isSuccess) {
+                val msg = "SYNCHRONIZE_CACHE_10(0x35): PASSED (csw=0x00)"
+                logLines += msg
+                logger?.info(TAG, msg)
+                diagnostics += ScsiCommandDiagnostic(
+                    commandName = "SYNCHRONIZE_CACHE_10",
+                    opcode = 0x35,
+                    succeeded = true,
+                    cswStatus = result.status
+                )
+                true
+            } else {
+                val (clearInRc, clearOutRc) = transport.clearBothEndpointHalts()
+                val sense = requestSenseForEject(logLines)
+                val diag = ScsiCommandDiagnostic(
+                    commandName = "SYNCHRONIZE_CACHE_10",
+                    opcode = 0x35,
+                    succeeded = false,
+                    cswStatus = result.status,
+                    senseData = sense,
+                    clearInRc = clearInRc,
+                    clearOutRc = clearOutRc
+                )
+                diagnostics += diag
+                val msg = "Eject command failed (ignored): ${diag.formatLogLine()}"
+                logLines += msg
+                logger?.warn(TAG, msg)
+                false
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UsbDisconnectedException) {
+            throw e
+        } catch (e: Exception) {
+            recordEjectException("SYNCHRONIZE_CACHE_10", 0x35, e, logLines, diagnostics)
+            false
+        }
+    }
+
+    private fun executeEjectTestUnitReady(
+        logLines: MutableList<String>,
+        diagnostics: MutableList<ScsiCommandDiagnostic>
+    ): Boolean {
+        for (attempt in 1..2) {
+            if (isCancelled()) throw CancellationException("USB eject cancelled.")
+            try {
+                val result = transport.executeCommand(
+                    lun = lun,
+                    cdb = ScsiCommandSet.testUnitReady(),
+                    direction = BotDirection.NONE,
+                    commandName = "TEST_UNIT_READY(0x00)",
+                    timeoutMs = EJECT_COMMAND_TIMEOUT_MS
+                )
+                if (result.isSuccess) {
+                    val msg = "TEST_UNIT_READY(0x00): PASSED (csw=0x00)"
+                    logLines += msg
+                    logger?.info(TAG, msg)
+                    diagnostics += ScsiCommandDiagnostic(
+                        commandName = "TEST_UNIT_READY",
+                        opcode = 0x00,
+                        succeeded = true,
+                        cswStatus = result.status
+                    )
+                    return true
+                }
+                val sense = requestSenseForEject(logLines)
+                if (sense != null && sense.isUnitAttention && attempt == 1) {
+                    val uaDiag = ScsiCommandDiagnostic(
+                        commandName = "TEST_UNIT_READY",
+                        opcode = 0x00,
+                        succeeded = false,
+                        cswStatus = result.status,
+                        senseData = sense
+                    )
+                    val msg = "TEST_UNIT_READY(0x00) cleared UNIT ATTENTION (${uaDiag.formatLogLine()}); retrying once"
+                    logLines += msg
+                    logger?.info(TAG, msg)
+                    sleepMs(100L)
+                    continue
+                }
+                val (clearInRc, clearOutRc) = transport.clearBothEndpointHalts()
+                val diag = ScsiCommandDiagnostic(
+                    commandName = "TEST_UNIT_READY",
+                    opcode = 0x00,
+                    succeeded = false,
+                    cswStatus = result.status,
+                    senseData = sense,
+                    clearInRc = clearInRc,
+                    clearOutRc = clearOutRc
+                )
+                diagnostics += diag
+                val msg = "Eject command failed (ignored): ${diag.formatLogLine()}"
+                logLines += msg
+                logger?.warn(TAG, msg)
+                return false
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: UsbDisconnectedException) {
+                throw e
+            } catch (e: Exception) {
+                recordEjectException("TEST_UNIT_READY", 0x00, e, logLines, diagnostics)
+                return false
+            }
+        }
+        return false
+    }
+
+    private fun executeEjectStartStopOnce(
+        logLines: MutableList<String>,
+        diagnostics: MutableList<ScsiCommandDiagnostic>
+    ): Boolean {
+        if (isCancelled()) throw CancellationException("USB eject cancelled.")
+        return try {
+            val result = transport.executeCommand(
+                lun = lun,
+                cdb = ScsiCommandSet.startStopUnit(start = false, loadEject = true),
+                direction = BotDirection.NONE,
+                commandName = "START_STOP_UNIT(0x1B,eject)",
+                timeoutMs = EJECT_COMMAND_TIMEOUT_MS
+            )
+            if (result.isSuccess) {
+                val msg = "START_STOP_UNIT(0x1B, LOEJ=1, START=0): PASSED (csw=0x00)"
+                logLines += msg
+                logger?.info(TAG, msg)
+                diagnostics += ScsiCommandDiagnostic(
+                    commandName = "START_STOP_UNIT",
+                    opcode = 0x1B,
+                    succeeded = true,
+                    cswStatus = result.status
+                )
+                true
+            } else {
+                val sense = requestSenseForEject(logLines)
+                val (clearInRc, clearOutRc) = transport.clearBothEndpointHalts()
+                val alreadyEjected = sense?.isMediumNotPresent == true
+                val diag = ScsiCommandDiagnostic(
+                    commandName = "START_STOP_UNIT",
+                    opcode = 0x1B,
+                    succeeded = alreadyEjected,
+                    cswStatus = result.status,
+                    senseData = sense,
+                    clearInRc = clearInRc,
+                    clearOutRc = clearOutRc
+                )
+                diagnostics += diag
+                val msg = if (alreadyEjected) {
+                    "START_STOP_UNIT(0x1B) reports medium already ejected: ${diag.formatLogLine()}"
+                } else {
+                    "Eject command failed (ignored): ${diag.formatLogLine()}"
+                }
+                logLines += msg
+                if (alreadyEjected) logger?.info(TAG, msg) else logger?.warn(TAG, msg)
+                alreadyEjected
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UsbDisconnectedException) {
+            throw e
+        } catch (e: Exception) {
+            recordEjectException("START_STOP_UNIT", 0x1B, e, logLines, diagnostics)
+            false
+        }
+    }
+
+    private fun recordEjectException(
+        commandName: String,
+        opcode: Int,
+        e: Exception,
+        logLines: MutableList<String>,
+        diagnostics: MutableList<ScsiCommandDiagnostic>
+    ) {
+        val (clearInRc, clearOutRc) = transport.clearBothEndpointHalts()
+        val sense = requestSenseForEject(logLines)
+        val usbCode = (e as? UsbBotCommandException)?.usbErrorCode
+        val diag = ScsiCommandDiagnostic(
+            commandName = commandName,
+            opcode = opcode,
+            succeeded = false,
+            usbErrorCode = usbCode,
+            senseData = sense,
+            clearInRc = clearInRc,
+            clearOutRc = clearOutRc,
+            detail = e.message ?: e::class.simpleName.orEmpty()
+        )
+        diagnostics += diag
+        val msg = "Eject command failed (ignored): ${diag.formatLogLine()}"
+        logLines += msg
+        logger?.warn(TAG, msg)
+    }
+
+    private fun requestSenseForEject(logLines: MutableList<String>): ScsiSenseData? {
+        val senseBuf = ByteArray(18)
+        return try {
+            val res = transport.executeCommand(
+                lun = lun,
+                cdb = ScsiCommandSet.requestSense(18),
+                direction = BotDirection.IN,
+                dataBuffer = senseBuf,
+                dataOffset = 0,
+                dataLength = 18,
+                commandName = "REQUEST_SENSE(0x03)",
+                timeoutMs = EJECT_COMMAND_TIMEOUT_MS
+            )
+            if (res.isSuccess && res.bytesTransferred >= 4) {
+                ScsiCommandSet.parseSense(senseBuf, res.bytesTransferred)
+            } else {
+                val msg = "Eject REQUEST_SENSE(0x03) ignored: opcode=0x03 | cswStatus=0x%02X | transferred=${res.bytesTransferred}/18".format(
+                    res.status and 0xFF
+                )
+                logLines += msg
+                logger?.warn(TAG, msg)
+                null
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UsbDisconnectedException) {
+            throw e
+        } catch (e: Exception) {
+            val usbCode = (e as? UsbBotCommandException)?.usbErrorCode
+            val msg = "Eject REQUEST_SENSE(0x03) failed (ignored): opcode=0x03 | usbCode=${usbCode ?: "N/A"} | ${e.message ?: e::class.simpleName}"
+            logLines += msg
+            logger?.warn(TAG, msg)
+            null
+        }
+    }
+
     override fun close() {
         closed = true
     }
@@ -703,5 +997,6 @@ class ScsiBlockDevice(
         const val MIN_TRANSFER_BYTES = 4 * 1024
         const val MAX_ALLOWED_TRANSFER_BYTES = 128 * 1024
         private const val MAX_BLOCK_RECOVERY_ATTEMPTS = 3
+        private const val EJECT_COMMAND_TIMEOUT_MS = 5_000
     }
 }
